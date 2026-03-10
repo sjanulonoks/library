@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.39
+version: 0.40
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -131,9 +131,11 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 
 ```
 ✅ SAFE to parallelize:
-   - datetime_get_current_time + list_datasources
+   - datetime_get_current_time + list_datasources (always)
    - list_alert_rules + get_annotations (both Tier 0)
    - list_alert_rules + label discovery (when service known)
+   - search_dashboards + list_prometheus_metric_names (Tier 1, when service known)
+   - list_datasources runs parallel with any other Tier 0 call
 
 ❌ NEVER parallelize:
    - Any two analytical queries (Tier 2+)
@@ -153,18 +155,31 @@ Assign to every finding before using it to support a conclusion:
 | **WEAK** | Temporal correlation only | Flag as observation, not evidence |
 | **SPECULATIVE** | Pattern match without direct evidence | Mention in "areas for further investigation" only |
 
+**Grounding rule:** Every finding cited in Step 8 MUST reference the specific tool call and returned value that produced it. If a claim cannot be traced to a tool output, label it `[INFERENCE]` and do not use it to support a root cause verdict.
+
 ---
 
 ## Hypothesis Tracking
 
-Maintain this table across all investigation steps. Update after EVERY backend query:
+Maintain both tables across all investigation steps. Update after EVERY backend query:
 
 ```
 ## HYPOTHESIS TRACKER
 | # | Hypothesis | Evidence For | Evidence Against | Strength | Status |
 |---|-----------|-------------|-----------------|----------|--------|
 | 1 | [statement] | [findings] | [findings] | STRONG/MOD/WEAK | ACTIVE/CONFIRMED/REFUTED |
+
+## SIGNAL COVERAGE
+| Signal | Backend | Status | Finding |
+|--------|---------|--------|---------|
+| Alerts | Grafana | ✅/⬜/🔲 | [summary or —] |
+| Metrics | Prometheus | ✅/⬜/🔲 | [summary or —] |
+| Traces | Tempo | ✅/⬜/🔲 | [summary or —] |
+| Logs | Loki | ✅/⬜/🔲 | [summary or —] |
 ```
+(✅ = checked | ⬜ = not yet | 🔲 = INSTRUMENTATION_GAP)
+
+**Completeness gate:** Step 8 output is incomplete until Signal Coverage shows ✅ or 🔲 for every signal relevant to the active hypotheses.
 
 ---
 
@@ -334,7 +349,9 @@ For past-incident queries: set window around incident time ±15 min.
 
 **MANDATORY: Check Tier 0 signals before querying any backend.**
 
-1. `list_datasources()` → alert-capable datasource UID [skip if in Session State]
+1. `list_datasources()` → discover all available backends. **Parallel with any Tier 0 call.**
+   Emit Signal Landscape: `Signal landscape: metrics=[uid|none] | traces=[uid|none] | logs=[uid|none]`
+   Store in Session State. This governs which discovery paths are available in Steps 2–7.
 2. **Parallel calls (both safe):**
    - `list_alert_rules(datasourceUid=..., limit=1000)` → Filter by `state="firing"` (client-side)
    - `get_annotations(From=<start_ms>, To=<end_ms>)` → deployment markers, maintenance windows
@@ -348,10 +365,11 @@ For past-incident queries: set window around incident time ±15 min.
 ### Step 1: Interpret & Hypotheses
 
 - Restate user issue in 1 sentence
+- **`<missing_context_gating>`:** If service name is not yet known (Step 2 not complete), mark ALL hypotheses formed here as `[ASSUMED-SERVICE]`. Do NOT commit to an investigation sequence until Step 2 confirms which service to target. Hypotheses are placeholders, not plans.
 - **Systems context:** What upstream/downstream dependencies does this service have? What recently changed in this part of the system? (Check annotations, deploy history)
 - Apply Known Failure Pattern fast-path (see below) — if matched, shortcut to indicated tier
 - Form 2–3 hypotheses that could explain the symptom — **include at least one non-obvious cause** (e.g., not just "the service is broken" but "an upstream dependency changed behavior") → **add to Hypothesis Tracker**
-- State chosen investigation sequence: "Starting with Metrics (latency issue). If inconclusive → Traces."
+- State chosen investigation sequence AFTER service confirmed: "Starting with Metrics (latency issue). If inconclusive → Traces."
 - **Ask yourself:** "If my first hypothesis is wrong, what would the evidence look like?" — this shapes what to query.
 - **`--history` active?** Load `resolutions/<service>.md`. If file has a `## Distilled Patterns` section (written by `--review`), use patterns directly. Otherwise scan most recent 5 entries. Add most recent historical root cause as hypothesis. MUST form >=1 contradicting hypothesis ("what if it's NOT [past cause]?"). Past **blind spots** and **user corrections** are highest-priority hypothesis seeds. If service unknown pre-Step 2, defer: set `history_pending=true` in Session State, load after Step 2 resolves service name. History informs — never shortcuts discovery. @see library/history.md
 - **Dependency signal check:** If ANY present → set `dependency_probe=true` in Session State: (1) user mentions upstream/downstream/cascading/dependency or names multiple services, (2) cross-service alerts firing in Step 0.5, (3) --history shows past multi-service causes, (4) dashboards reference multiple services, (5) multi-service deploys in annotations. Add hypothesis: "upstream dependency may have caused symptom in [target service]."
@@ -368,11 +386,15 @@ If service name in Session State: skip. If user provides exact names: use direct
 
 If `search_dashboards` returns matches: retrieve `get_dashboard_summary` + `get_dashboard_panel_queries` to understand instrumentation.
 
-**No specific service named?** ("everything is slow", "errors across the board"):
-1. `list_alert_rules(limit=1000)` → group firing alerts by service label → investigate highest-severity service first
-2. If no alerts: `search_dashboards(query="<symptom keyword>")` → find relevant dashboards
-3. Top-down: query `up{} == 0` + discover HTTP error metric (`list_prometheus_metric_names(regex="http.*request.*total|http.*server.*request.*")`) → query top 5 error rates by service-identity label → identify affected services
-4. Pick the most affected service → proceed with standard discovery
+**No specific service named?** ("everything is slow", "errors across the board") — Dynamic Discovery:
+1. **Tempo first** (if `traces` in Signal Landscape): query service graph metrics → `tempo_query_metrics(query="traces_service_graph_request_failed_total")` → reveals all services + error/latency profile in 1 query. Returns ranked candidate list.
+2. **Prometheus fallback** (if Tempo unavailable or empty): `list_prometheus_metric_names(regex="<symptom_keyword>")` → discover affected metric domains → query `up{} == 0` + top 5 error rates by service-identity label.
+3. **Logs fallback** (if Prometheus also empty): `search_loki(query="<symptom_keyword>", limit=20)` → group error logs by service label.
+4. Cross-correlate candidates across available sources → produce ranked list:
+   ```
+   Service candidates: [service-A | confidence=HIGH (3/3 backends)] [service-B | MED (2/3)]
+   ```
+5. Pick highest-confidence candidate → state reasoning → proceed with standard discovery.
 
 **Output + store in Session State:**
 
@@ -411,9 +433,11 @@ Discovery method: [conventional | discovered via label_names]
 3. Complete Query Plan — classify intent, select function, document plan
 4. Apply query language checklist (Appendix A/B/C) — rewrite non-compliant patterns
 5. Execute query with correct type (Instant for values, Range for trends)
-6. Handle empty/NaN results (empty = no data, not always "no problem")
+6. **`<tool_persistence_rules>`:** Do NOT conclude absence on first empty result. Retry with:
+   (a) alternate label/metric/attribute name, (b) broader time range (2×), (c) label discovery fallback.
+   Only after 2+ strategies exhausted → mark `[INSTRUMENTATION_GAP]` in Signal Coverage + continue.
 7. Analyze: trend, spike, anomaly
-8. Extract 1–5 key findings → **update Hypothesis Tracker**
+8. Extract 1–5 key findings → **update Hypothesis Tracker + Signal Coverage**
 
 #### Backend-Specific Notes
 
@@ -459,6 +483,8 @@ Anomaly: [description]
 ```
 
 **Output requirement:** If verdict is ROOT CAUSE → output the CAUSAL VALIDATION block verbatim before proceeding to Step 8. The Step 8 root cause section MUST reference a completed CAUSAL VALIDATION block — no root cause claim is valid without one.
+
+**`<dig_deeper_nudge>`:** Before committing to ROOT CAUSE verdict — ask: what second-order cause could produce the same observation? Check one level deeper. If the first plausible mechanism also explains the symptom via a different path, investigate that path before finalizing verdict.
 
 ### Step 5: Continue or Stop?
 
