@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.45
+version: 0.46
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -58,6 +58,8 @@ Evidence-based investigation across **all available** observability signals. Sin
 | **EXPLORE** | "What services/metrics exist?", health overview | Step 0 → 0.5 → Step 2 → `up{} == 0` + top error rates → Step 8 |
 | **VALIDATE** | User has hypothesis; confirm or deny | Step 0 → Step 2 → query relevant backend → confirm/deny → Step 8 |
 | **DISCOVER** | "Show me available dashboards/alerts/services" | list_datasources + search_dashboards + list_alert_rules → structured catalogue |
+
+**Mode bridge:** Intent mode (above) determines *workflow route*. Investigation depth mode (TRIAGE/STANDARD/DEEP DIVE) determines *output format and budget ceiling*, and is set at Step 1 for INVESTIGATE paths.
 
 **User expertise inference:**
 - Vague symptom ("things are slow") → novice: explain each step briefly
@@ -128,7 +130,10 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 | No blind queries | Always discover labels before constructing queries. |
 | Query language discipline | Apply PromQL/LogQL/TraceQL rules (Appendices A-C) to every query. |
 | Query budget | **Primary stop: Δ-Quality (Step 5).** Numeric ceilings are circuit breakers only. \
-| | Mode ceilings: TRIAGE ≤3 · STANDARD ≤8 · DEEP DIVE ≤15 analytical queries. \
+| | INVESTIGATE depth ceilings: STANDARD ≤8 · DEEP DIVE ≤15 analytical queries. \
+| | TRIAGE: 0 analytical queries by definition (alert evidence self-sufficient; no backend queries). \
+| | EXPLORE/VALIDATE: ≤5 analytical queries (discovery-centric; escalate to INVESTIGATE if anomaly found). \
+| | DISCOVER: ≤0 analytical queries (list/search calls only). \
 | | **Count analytical queries only** — discovery/label/metadata calls are free. \
 | | Budget ceiling reached AND Δ-Quality still >0? → Emit inline and continue: \
 | | `[BUDGET: extended — N queries used, last query changed <hypothesis> status]` \
@@ -162,7 +167,7 @@ Assign to every finding before using it to support a conclusion:
 | **STRONG** | Direct metric/trace/log showing causal mechanism | Can support root cause claim |
 | **MODERATE** | Temporal correlation + plausible mechanism | Can support hypothesis, needs corroboration |
 | **WEAK** | Temporal correlation only | Flag as observation, not evidence |
-| **SPECULATIVE** | Pattern match without direct evidence | Mention in "areas for further investigation" only |
+| **SPECULATIVE** | Pattern match without direct evidence | Omit from STANDARD. In DEEP DIVE: mention in Further Investigation subsection only. Never use to support root cause claim. |
 
 **Grounding rule:** Every finding cited in Step 8 MUST reference the specific tool call and returned value that produced it. If a claim cannot be traced to a tool output, label it `[INFERENCE]` and do not use it to support a root cause verdict.
 
@@ -402,6 +407,10 @@ For past-incident queries: set window around incident time ±15 min.
 - **Ask yourself:** "If my first hypothesis is wrong, what would the evidence look like?" — this shapes what to query.
 - **`--history` active?** Load `resolutions/<service>.md`. If file has a `## Distilled Patterns` section (written by `--review`), use patterns directly. Otherwise scan most recent 5 entries. Add most recent historical root cause as hypothesis. MUST form >=1 contradicting hypothesis ("what if it's NOT [past cause]?"). Past **blind spots** and **user corrections** are highest-priority hypothesis seeds. If service unknown pre-Step 2, defer: set `history_pending=true` in Session State, load after Step 2 resolves service name. History informs — never shortcuts discovery. @see library/history.md
 - **Dependency signal check:** If ANY present → set `dependency_probe=true` in Session State: (1) user mentions upstream/downstream/cascading/dependency or names multiple services, (2) cross-service alerts firing in Step 0.5, (3) --history shows past multi-service causes, (4) dashboards reference multiple services, (5) multi-service deploys in annotations. Add hypothesis: "upstream dependency may have caused symptom in [target service]."
+- **Set Mode in Session State (INVESTIGATE paths):**
+  TRIAGE → firing alert fully explains symptom → exit to Step 8 directly (0 analytical queries).
+  DEEP DIVE → ≥3 backends expected, multi-service scope, or contradicting hypotheses from the start.
+  STANDARD → all other cases (default). **Upgrade to DEEP DIVE mid-investigation if scope expands.**
 
 ### Step 2: Service Discovery (Once — Reuse Everywhere)
 
@@ -535,9 +544,9 @@ DONE WHEN:      All active hypotheses CONFIRMED or REFUTED, AND Signal Coverage 
                 ✅ or 🔲 for every signal (no ⬜ remains) relevant to active hypotheses.
 KEEP GOING IF:  ≥1 hypothesis is ACTIVE AND a specific query would change its status
                 — name the backend + query before proceeding. If you can't name it, STOP.
-                AND within budget ceiling for active mode (TRIAGE ≤3 / STANDARD ≤8 / DEEP DIVE ≤15).
-                Budget ceiling reached AND Δ-Quality >0 → emit budget-extension note and continue
-                (see Operating Constraints). Hard ceiling 25 applies regardless.
+                AND within budget ceiling for active mode (STANDARD ≤8 / DEEP DIVE ≤15;
+                EXPLORE/VALIDATE ≤5). Budget ceiling reached AND Δ-Quality >0 → emit
+                budget-extension note and continue (see Operating Constraints). Hard ceiling 25.
                 AND last query materially changed a hypothesis (Δ-Quality). If last 2 queries
                 both returned signal that left every hypothesis ACTIVE/unchanged → STOP.
                 Inconclusive signal that accumulates without resolution = budget waste.
@@ -551,7 +560,7 @@ NOTE: [INSTRUMENTATION_GAP] = Signal Coverage row marker (Step 4 tracking).
 
 ### Steps 6–7: Query Backend 2 / Backend 3
 
-Repeat Step 4 for next backend.
+Repeat Step 4 for next backend. **If a root cause candidate emerges from this backend → run Step 4.5 Causal Reasoning Protocol before proceeding to Step 8. Do not skip CAUSAL VALIDATION on secondary backends.**
 
 ```
 ### CONTEXT FROM [BACKEND 1]
@@ -559,8 +568,10 @@ Repeat Step 4 for next backend.
 Now checking [BACKEND 2]. Service appears as: [label=value]
 ```
 
+### Step 8: Synthesize & Output (Adaptive Depth)
+
 <pre_output_verification>
-Before emitting Step 8 output (ALL modes):
+Before emitting Step 8 output (ALL paths — TRIAGE, STANDARD, DEEP DIVE, and non-INVESTIGATE modes):
 1. Correctness:   Does output answer the original user question?
 2. Grounding:     Every claim traceable to a named tool call and returned value? (unattributed = [INFERENCE])
 3. Format:        Does output match the <output_contract> for the active mode?
@@ -568,11 +579,9 @@ Before emitting Step 8 output (ALL modes):
 If any step fails → return to earliest failing step before outputting.
 </pre_output_verification>
 
-### Step 8: Synthesize & Output (Adaptive Depth)
-
 | Findings | Output Mode |
 |----------|-------------|
-| Alert directly explained symptom (≤2 tool calls) | **TRIAGE** |
+| Alert directly explained symptom (alert evidence self-sufficient — no analytical backend queries needed) | **TRIAGE** |
 | 1–2 backends queried, clear root cause | **STANDARD** |
 | 3+ backends queried, complex multi-cause incident | **DEEP DIVE** |
 | No anomalies found across queried backends | **NO ANOMALY** |
@@ -599,7 +608,8 @@ Ruled out: [hypotheses refuted]
 <output_contract: STANDARD>
 Required sections (in order): summary, timeline, evidence, root-cause, immediate-action
 Root cause section MUST reference a completed CAUSAL VALIDATION block from Step 4.5.
-Omit: contributing-factors, evidence-appendix (→ use DEEP DIVE for 3+ backend incidents).
+Optional: contributing-factors (≤2 bullets; include only if ≥1 MODERATE finding is distinct from root cause and actionable).
+Omit: evidence-appendix (→ use DEEP DIVE for 3+ backend incidents).
 </output_contract>
 ```
 1. **Summary** — What / Impacted / Window
@@ -619,6 +629,7 @@ Omit: contributing-factors, evidence-appendix (→ use DEEP DIVE for 3+ backend 
 ```
 <output_contract: DEEP DIVE>
 Required sections (in order): summary, timeline, evidence, root-cause, contributing-factors, evidence-appendix
+Optional: further-investigation (include only if SPECULATIVE findings exist — state the signal that would confirm each one).
 Root cause MUST reference CAUSAL VALIDATION. Contributing factors MUST have Evidence Strength grade.
 Multi-service: if root cause is in upstream service X, prefix output header: "⛓️ [TargetService] ← upstream: [RootCauseService]"; root-cause section describes [RootCauseService].
 [context-override: synthesis-breadth > retrieval-precision for 3+ backend investigations]
@@ -628,6 +639,7 @@ Retain full Signal Coverage Map + complete Hypothesis Tracker in output.
 Standard format PLUS:
 6. **Contributing Factors** — What conditions enabled the failure? (with Evidence Strength grade)
 7. **Evidence Appendix** — Queries used, raw findings, deeplinks
+8. **Further Investigation** (optional) — SPECULATIVE findings only; for each, state what signal would confirm it.
 
 #### NO ANOMALY Format
 ```
@@ -712,6 +724,7 @@ Cannot confirm or rule out: [hypotheses that remain ACTIVE due to missing signal
 | "disk", "storage", "no space left" | Metrics | `node_filesystem_avail_bytes` |
 | "5xx", "error rate", "requests failing" | Metrics | `http_requests` total/errors, then Traces for error spans |
 | "slow", "latency", "high response time" | Metrics | `histogram_quantile` p99/p95, then Traces for slow traces |
+| "slow" / "unresponsive" with **no explicit error signals** | Metrics | Resource saturation first: CPU (`node_cpu_seconds_total`), memory (`container_memory_working_set_bytes`), connections (`connection_pool_active`) vs baseline — latency is the symptom, saturation is the candidate cause |
 
 ---
 
