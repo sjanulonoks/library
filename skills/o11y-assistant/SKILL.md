@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.42
+version: 0.43
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -24,6 +24,7 @@ reasoning_effort: >
 - Service name cannot be resolved after 3 discovery attempts
 - ALL available backends have been queried with no findings
 - Evidence directly contradicts itself and you cannot determine which is correct
+- Signal Landscape reveals NO recognized signal type at all (all tiers `none` or all datasource types are unrecognizable) — state what IS visible and ask how to proceed
 
 **Flags (user can invoke at any point in conversation):**
 - `--history` → Load `resolutions/<service>.md` at Step 1. Use past outcomes + blind spots as hypothesis seeds. MUST form contradicting hypothesis. @see library/history.md for details.
@@ -107,6 +108,7 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 - Stack trace / log pattern mentioned → start Tier 4
 - Slow dependency / distributed flow → start Tier 3
 - User names specific backend → honor it
+- Signal Landscape shows tier as `none` → skip that tier entirely; mark as 🔲 UNAVAILABLE in Signal Coverage from the start. Do NOT list it as "checked" in Step 8 output.
 
 ---
 
@@ -352,6 +354,13 @@ For past-incident queries: set window around incident time ±15 min.
 1. `list_datasources()` → discover all available backends. **Parallel with any Tier 0 call.**
    Emit Signal Landscape: `Signal landscape: metrics=[uid|none] | traces=[uid|none] | logs=[uid|none]`
    Store in Session State. This governs which discovery paths are available in Steps 2–7.
+   **Environment calibration — sense before proceeding:**
+   - Any tier `none`? → mark it 🔲 UNAVAILABLE in Signal Coverage immediately. Skip its steps.
+   - Any unfamiliar datasource type (not prometheus/loki/tempo/cloudwatch/clickhouse/mimir)?
+     → call `get_query_examples(DatasourceType=<type>)` BEFORE querying it. Treat as unknown backend.
+   - All tiers `none` or all types unrecognizable? → trigger Autonomy Rule pause (state what IS available).
+   - Only 1 signal type available? → state constraint explicitly: "Investigation scope limited to
+     [type] — [missing types] not available in this environment."
 2. **Parallel calls (both safe):**
    - `list_alert_rules(datasourceUid=..., limit=1000)` → Filter by `state="firing"` (client-side)
    - `get_annotations(From=<start_ms>, To=<end_ms>)` → deployment markers, maintenance windows
@@ -369,6 +378,7 @@ For past-incident queries: set window around incident time ±15 min.
 - **Systems context:** What upstream/downstream dependencies does this service have? What recently changed in this part of the system? (Check annotations, deploy history)
 - Apply Known Failure Pattern fast-path (see below) — if matched, shortcut to indicated tier
 - Form 2–3 hypotheses that could explain the symptom — **include at least one non-obvious cause** (e.g., not just "the service is broken" but "an upstream dependency changed behavior") → **add to Hypothesis Tracker**
+- **Instrumentation hypothesis (always form):** "Is this environment's signal coverage sufficient to answer the question?" If Signal Landscape has any `none` or UNAVAILABLE tier, add to Hypothesis Tracker: "Root cause may reside in a signal type not exposed by this environment [INSTRUMENTATION_GAP risk]." This is not defeatism — it pre-arms the investigation against silent blind spots.
 - State chosen investigation sequence AFTER service confirmed: "Starting with Metrics (latency issue). If inconclusive → Traces."
 - **Ask yourself:** "If my first hypothesis is wrong, what would the evidence look like?" — this shapes what to query.
 - **`--history` active?** Load `resolutions/<service>.md`. If file has a `## Distilled Patterns` section (written by `--review`), use patterns directly. Otherwise scan most recent 5 entries. Add most recent historical root cause as hypothesis. MUST form >=1 contradicting hypothesis ("what if it's NOT [past cause]?"). Past **blind spots** and **user corrections** are highest-priority hypothesis seeds. If service unknown pre-Step 2, defer: set `history_pending=true` in Session State, load after Step 2 resolves service name. History informs — never shortcuts discovery. @see library/history.md
