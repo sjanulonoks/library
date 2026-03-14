@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.48
+version: 0.49
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -280,9 +280,9 @@ Maintain both tables across all investigation steps. Update after EVERY backend 
 |------|-----------------|----------|
 | `tempo_get-attribute-names` | `datasourceUid`, `scope` (optional) | Discover available trace attributes |
 | `tempo_get-attribute-values` | `datasourceUid`, `name` | Discover values. 🔴 `filter-query`: single `{ }`, `&&` only (no `\|\|`). |
-| `tempo_traceql-search` | `datasourceUid`, `query`, `start`, `end`, `limit` | **Search queries** (find traces). ❌ Do NOT send aggregations here. |
-| `tempo_traceql-metrics-instant` | `datasourceUid`, `query`, `start`, `end` | **Metrics queries** (count, rate, quantile, avg). Single value. |
-| `tempo_traceql-metrics-range` | `datasourceUid`, `query`, `start`, `end` | **Metrics queries** with time-series output. |
+| `tempo_traceql-search` | `datasourceUid`, `query`, `start`, `end`, `limit` | **Search queries** (find traces). ❌ Do NOT send aggregations here. *Heuristic: Unknown-Unknowns (Mechanistic Proof):* `{A} >> {B}` proves wait-time *between* components. Pivot to 0 logs = **Rate-Limiting Drop**, not evidence of absence. |
+| `tempo_traceql-metrics-instant` | `datasourceUid`, `query`, `start`, `end` | **Metrics queries** (count, rate, quantile, avg). Single value. *Heuristic: Known-Unknowns (The Spatial Proof):* `topk(5, {status=error} | count_over_time...)` dynamically calculates structural dimensions discarded by Prometheus. |
+| `tempo_traceql-metrics-range` | `datasourceUid`, `query`, `start`, `end` | **Metrics queries** with time-series output. *Heuristic: Known-Unknowns (The Temporal Proof):* `rate({status=error && peer.service="discovered_peer"}[1m])` mathematically proves the spatially isolated node's degradation aligns temporally with the incident (satisfying Coincidence Check). |
 | `tempo_get-trace` | `datasourceUid`, `trace_id` | Retrieve full trace by ID |
 
 **Tempo query type validation:**
@@ -535,6 +535,7 @@ For each detected anomaly:
    *Proportional: anomaly in X is directionally consistent AND ≥30% of the symptom’s relative magnitude vs pre-incident baseline. State both numbers explicitly.*
    *(Evidence Sufficiency: Do not declare ROOT CAUSE based solely on identifying a dependency or Structural Key.)*
 5. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Do not recurse further.
+6. **Epistemic State Check** (TraceQL ONLY): If metrics yield empty topologies, label the diagnostic gap a `Known-Unknown` (Black Box). Before running TraceQL, acknowledge that `with(sample=true)` provides a statistical approximation of the fault. If resolving a Trace via Logs fails, actively flag the non-linear interaction (Rate-Limiting Drop) before discarding the diagnostic hypothesis.
 
 ```
 ## CAUSAL VALIDATION
@@ -889,41 +890,46 @@ Auto-discover service dependencies. Try each tier in order — **stop at first t
 
 **Naming:** Upstream = calls us (we are `server`). Downstream = we call them (we are `client`).
 
-## Tier 1: Service Graph Metrics (1-2 queries)
+## Tier 1: Service Graph Metrics & Spanmetrics (Mapping Macroscopic Symptoms)
 
+1. **Service Graph** (1–2 queries):
+   ```
+   list_prometheus_metric_names(regex="traces_service_graph_request_total")
+   → if exists:
+     Downstream: query_prometheus('sum by (client, connection_type) (rate(traces_service_graph_request_total{server="<svc>"}[5m])) > 0')
+     Upstream:   query_prometheus('sum by (server, connection_type) (rate(traces_service_graph_request_total{client="<svc>"}[5m])) > 0')
+   ```
+2. **Spanmetrics** (1–3 queries):
+   ```
+   list_prometheus_metric_names(regex="span.*|traces_spanmetrics.*")
+   → if exists:
+     list_prometheus_label_names(matches="<spanmetric>{...}")
+     list_prometheus_label_values(labelName="<found_label>", matches="<metric>{<service_label>=\"<svc>\"}")
+   ```
+
+## Tier 2: TraceQL Dynamic Discovery (Resolving Known-Unknowns)
+
+**The Epistemic Tension:** Use ONLY if Tier 1 metrics confirm a macroscopic symptom but fail to isolate the specific causal node due to cardinality compression. The agent must acknowledge the mathematical limit of the metric before proceeding.
+
+**1. Dynamic Sensing Loop:**
 ```
-list_prometheus_metric_names(regex="traces_service_graph_request_total")
-→ if exists:
-  Upstream:   query_prometheus('sum by (client, connection_type)
-              (rate(traces_service_graph_request_total{server="<svc>"}[5m])) > 0')
-  Downstream: query_prometheus('sum by (server, connection_type)
-              (rate(traces_service_graph_request_total{client="<svc>"}[5m])) > 0')
+tempo_get-attribute-names
 ```
+🔴 **FORBIDDEN:** Hardcoding target attributes (like `peer.service`) is a premature RCA conclusion. You MUST dynamically derive available attributes from reality.
 
-Bonus: error ratio via `_failed_total`/`_total`, latency via `_server_seconds` histogram.
-Gotcha: edges only appear with active traffic — use `[30m]` for low-traffic paths. Database/external services appear as virtual `server` nodes.
-
-## Tier 2: Spanmetrics Label Discovery (1-3 queries)
-
+**2. The Spatial Proof (Instant Aggregation):**
+Construct dynamic queries using the sensed attributes to structurally isolate the fault (e.g., finding the peer generating the highest counts).
 ```
-list_prometheus_metric_names(regex="span.*|traces_spanmetrics.*")
-→ if exists:
-  list_prometheus_label_names(matches="<spanmetric>{...}")
-  → find relationship labels: peer.service, net.peer.name, server, client, db.system
-  list_prometheus_label_values(labelName="<found_label>", matches="<metric>{<service_label>=\"<svc>\"}")
+tempo_traceql-metrics-instant(query='topk(5, {status=error} | count_over_time(...))')
 ```
+🔴 **FORBIDDEN:** NEVER use `most_recent=true` (severe performance penalty). 
+🟢 **ALWAYS USE:** `with(sample=true)` — Explicitly rely on Tempo's statistical guarantee of the failure shape for spatial isolation.
 
-Note: label names vary by instrumentation — discover, never assume.
-
-## Tier 3: Trace Sampling (2-4 queries — fallback)
-
+**3. The Temporal Proof (Causal Range Validation):**
+Discovering a fault node spatially does not prove causality (it could be background noise). You MUST satisfy the Step 4.5 Coincidence Check by calculating its derivative against the macroscopic symptom timeline.
 ```
-tempo_traceql-search({ resource.service.name="<svc>" }, limit=3)
-→ tempo_get-trace for each → extract unique resource.service.name
-  Parent spans → upstream. Child spans → downstream.
+tempo_traceql-metrics-range(query='rate({status=error && peer.service="<discovered_peer>" | count_over_time(...)}[1m])')
 ```
-
-Note: sampling gives incomplete view — async/infrequent deps may not appear.
 
 ## Output
 
@@ -932,5 +938,5 @@ Store in Session State:
   known_dependencies:
     upstream: [svc-a (sync), svc-b (messaging_system)]
     downstream: [svc-c (sync), db-main (database)]
-    source: service_graph | spanmetrics | trace_sampling
+    source: service_graph | spanmetrics | traceql_discovery
 ```
