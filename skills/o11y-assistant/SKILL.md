@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.47
+version: 0.48
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -79,6 +79,7 @@ Datasource UIDs:   metrics=<uid>  logs=<uid>  traces=<uid>
 Service mapping:   <user_term> → traces:<name>, logs:<service_label>=<val>,
                                  metrics:<service_label>=<val>
 Time context:      current_utc=<ts>  investigation_window=<start>–<end>
+Primary Constraint: [Extract immutable bounds from prompt, e.g. user_id=123, time=14:00. If generic: None provided]
 Severity:          [LOW|MEDIUM|HIGH|CRITICAL]
 Mode:              [TBD|TRIAGE|STANDARD|DEEP DIVE]   ← set at Step 1 once Signal Landscape known
 Budget:            0 analytical queries / [3|8|15] ceiling
@@ -110,6 +111,7 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 ```
 
 **Symptom overrides (document when applied):**
+- Scope-Gated Override: If exact service labels are confirmed AND a baseline metric exists, you may skip tiers.
 - Deployment/infrastructure event → check annotations first
 - Stack trace / log pattern mentioned → start Tier 4
 - Slow dependency / distributed flow → start Tier 3
@@ -404,6 +406,7 @@ For past-incident queries: set window around incident time ±15 min.
 ### Step 1: Interpret & Hypotheses
 
 - Restate user issue in 1 sentence
+- **Extract Primary Constraint:** Identify immutable bounds in the user prompt (e.g., `user_id=123`, `time=14:00 UTC`). Add this to the Session State `Primary Constraint:` field. If the prompt is generic ("system is broken"), set to `[None provided]`.
 - **Motivated Reasoning check:** Does the user's phrasing imply a preferred conclusion?
   Signal phrases: "confirm that...", "I think it's...", "shouldn't it be...", "just check X".
   If YES → emit before forming hypotheses: `⚠️ PRIOR DETECTED: [prior]. Suspended. Analysis below treats it as one hypothesis among peers — will confirm OR refute.`
@@ -462,6 +465,7 @@ Discovery method: [conventional | discovered via label_names]
 
 ### Step 3: Determine Investigation Sequence
 
+- User provided Low Entropy Anchor (Trace ID)? → Anchor Fast-Path. Bypass discovery, extract trace. MUST pivot to metrics post-extraction to satisfy ADR-021 Proportionality.
 - Alerts found (Step 0.5)? → Use alert labels as seed; begin at cheapest unqueried tier
 - Known failure pattern matched? → Use pattern fast-path tier
 - Otherwise → Apply signal cost hierarchy (Alerts done → Metrics → Traces → Logs)
@@ -524,10 +528,13 @@ Discovery method: [conventional | discovered via label_names]
 
 For each detected anomaly:
 
-1. **Cause or Symptom?** — If I fix X, does the original symptom disappear?
-2. **Coincidence check** — Did X start BEFORE the symptom? Is the magnitude proportional?
+1. **Constraint Intersection Check** (MANDATORY): `[YES/NO] - Does this finding explicitly contain the Primary Constraint, OR does its exact timestamp overlap precisely with the timeframe of the User Constraint? (If timestamps differ by > 5 minutes, you MUST answer NO).` If NO → `STATUS: RED HERRING`. Discard finding and return to source hypothesis.
+2. **Breadcrumb Anchors (Structural Keys)**: Hunt for IPs, unique correlation IDs, or framework classes. If a Structural Key is found *inside* a valid constrained log, pivot laterally to map the involved architecture.
+3. **Cause or Symptom?** — If I fix X, does the original symptom disappear?
+4. **Coincidence check** — Did X start BEFORE the symptom? Is the magnitude proportional?
    *Proportional: anomaly in X is directionally consistent AND ≥30% of the symptom’s relative magnitude vs pre-incident baseline. State both numbers explicitly.*
-3. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Do not recurse further.
+   *(Evidence Sufficiency: Do not declare ROOT CAUSE based solely on identifying a dependency or Structural Key.)*
+5. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Do not recurse further.
 
 ```
 ## CAUSAL VALIDATION
@@ -624,7 +631,7 @@ Ruled out: [hypotheses refuted]
 <output_contract: STANDARD>
 Required sections (in order): summary, timeline, evidence, root-cause, immediate-action, ruled-out
 Root cause section MUST reference a completed CAUSAL VALIDATION block from Step 4.5.
-Optional: contributing-factors (≤2 bullets; include only if ≥1 MODERATE finding is distinct from root cause and actionable).
+Optional: contributing-factors (≤2 bullets; include only if ≥1 MODERATE finding is distinct from root cause and actionable), involved-architecture (list specific nodes discovered via breadcrumbs).
 Omit: evidence-appendix (→ use DEEP DIVE for 3+ backend incidents).
 ruled-out (required): for each REFUTED hypothesis, name the specific evidence that refuted it — 1 line max per hypothesis.
 </output_contract>
@@ -645,7 +652,7 @@ ruled-out (required): for each REFUTED hypothesis, name the specific evidence th
 #### DEEP DIVE Format
 ```
 <output_contract: DEEP DIVE>
-Required sections (in order): summary, timeline, evidence, root-cause, contributing-factors, evidence-appendix, ruled-out
+Required sections (in order): summary, timeline, evidence, root-cause, contributing-factors, involved-architecture, evidence-appendix, ruled-out
 Optional: further-investigation (include only if SPECULATIVE findings exist — state the signal that would confirm each one).
 Root cause MUST reference CAUSAL VALIDATION. Contributing factors MUST have Evidence Strength grade.
 ruled-out (required): for each REFUTED hypothesis, name the specific evidence that refuted it — 1 line max per hypothesis.
