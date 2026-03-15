@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.54
+version: 0.55
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -371,6 +371,29 @@ Budget: [N/ceiling] analytical queries used   ← increment Session State Budget
 
 ---
 
+## The Unified Diagnostic Algorithm (UDA)
+
+The agent MUST operate under the Unified Diagnostic Algorithm (UDA) to ensure rigorous epistemic hygiene, structural inspection, and verified causal links. The UDA spans the entire investigation:
+
+1. **UDA 1. Anchor & Breadth (Systems/RCA):**
+   - Do NOT accept the user's incident time as absolute truth. Use metric derivatives (e.g., `rate()`) to explicitly find the exact T=0 slope change.
+   - Execute a Global Breadth check to differentiate a Point Failure (one node) from a Systemic Degradation (shared infra/network).
+2. **UDA 2. Structural Inspection (Gregg/Systems):**
+   - Apply **RED-S** (Rate, Errors, Duration, Saturation) to all suspect services. High usage without saturation is a symptom, not a cause.
+   - Enforce **Logical USE**: Apply Utilization/Saturation/Errors specifically to logical resources (thread pools, connection pools, queue depths). Apply non-linear Little's Law math when saturation nears 100%.
+3. **UDA 3. Trace Dissection (1st Principles/Gregg):**
+   - Execute **Critical Path Time Division**.
+   - Evaluate **Span Count** (Structural Emergence / N+1 query checks) BEFORE evaluating **Span Duration**.
+   - **The Dark Matter Pivot**: If the uninstrumented void (Trace Duration minus sum of Span Durations) > 20%, pivot immediately to host/infrastructure metrics (CPU schedule delay, GC pauses, network limits).
+4. **UDA 4. Propagation & Origin (Systems/RCA):**
+   - Differentiate errors that are **Generated** (originating locally) vs. **Propagated** (surfaced by a downstream dependency).
+   - **Input Contract Rule**: Slow execution must be proven to not be the result of a sudden upstream payload/load change (e.g., larger batch size) before declaring the node itself faulty.
+5. **UDA 5. Causal Triangulation (RCA):**
+   - Anomalies must survive Dual Isolation: **Spatial Proof** (isolating the failing node) AND **Temporal Proof** (proving exact chronologic alignment with the macroscopic symptom).
+   - **The Deductive Void**: Missing expected signals actively refute hypotheses. If a signal *should* be there logically but isn't, use that structural absence as evidence.
+
+---
+
 ## Investigation Workflow (Steps 0–8)
 
 ### Step 0: Establish Time Context
@@ -552,19 +575,22 @@ For each detected anomaly:
    *(Evidence Sufficiency: ROOT CAUSE declaration REQUIRES causal/saturation evidence beyond just identifying a dependency.)*
 8. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Recurse MAXIMUM 2 levels.
 9. **Epistemic State Check** (Universal): Acknowledge Diagnostic Gaps (KU) as a broken causal chain requiring immediate traversal. Actively flag The Void (UU) when expected signals vanish across boundaries (e.g. Rate-Limiting Drop), recognizing this structural absence as the necessary deductive bridge to the final root cause.
+10. **Feedback Loop Detection**: If Request Rate and Duration/Errors spike concurrently, explicitly hypothesize a feedback loop (e.g., "Retry Storm" or "Thundering Herd"). Look for retries from upstream or backoff failures.
 
 ```
 ## CAUSAL VALIDATION
 Anomaly: [description]
-├─ Cause or symptom? [cause | symptom of ___]
-├─ Timing: X started [before|after|simultaneously] with symptom
-├─ One level deeper: X happened because [___]
+├─ Timing & Spatial Proof: [Proof of alignment with macroscopic symptom]
 ├─ Reversal test: strongest evidence AGAINST this verdict = [___]
 │   Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent from all queried backends."
 │   Present and unresolved → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
 ├─ Black boxes: [what was NOT checked that could invalidate this verdict — name ≥1]
 │   Examples: unsampled traces, external deps absent from service graph, config-only changes
 │   without metrics exposure, async/batch paths not in the investigation window.
+├─ Tripartite Causality:
+│   ├─ Trigger: [The active force, e.g., Traffic Spike, Deploy, Config Change]
+│   ├─ Vulnerability: [The structural flaw, e.g., Unbounded memory pool, lack of backoff]
+│   └─ Precondition: [Historical catalyst, if applicable, e.g., Data growth over months]
 └─ Verdict: [ROOT CAUSE | CONTRIBUTING FACTOR | SYMPTOM | COINCIDENCE]
 ```
 
@@ -617,6 +643,8 @@ Before emitting Step 8 output (ALL paths — TRIAGE, STANDARD, DEEP DIVE, and no
 4. Completeness:  Signal Coverage shows ✅ or 🔲 for all active hypothesis signals?
 If any step fails → return to earliest failing step before outputting.
 </pre_output_verification>
+
+**The Self-Healing Clause:** For incidents that show a clear return to baseline within the investigation window, the output MUST identify the exact time of recovery and systematically correlate it with any resolving actions found in annotations (e.g., pod restarts, reverts, auto-scaling).
 
 | Findings | Output Mode |
 |----------|-------------|
@@ -701,7 +729,8 @@ Checked:
   Traces:  [N] traces sampled, no error spans, p99 [Yms]
   Logs:    no error-level entries in window
 Possible explanations:
-  - Issue resolved before investigation (check recent deploy/restart)
+  - **Semantic Failure**: Telemetry is healthy, but logic/data/state is flawed (e.g., returned 200 OK with wrong data).
+  - **Self-Healing**: Issue resolved before investigation began (check recent deploy/restart).
   - Issue is intermittent → suggest: set alert on [specific metric]
   - Issue outside instrumented scope → suggest: check [uninstrumented area]
 Ruled out: [hypotheses tested]
