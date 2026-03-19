@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.58
+version: 0.59
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -103,6 +103,7 @@ Severity:          [LOW|MEDIUM|HIGH|CRITICAL]
 Mode:              [TBD|TRIAGE|STANDARD|DEEP DIVE]   ← set at Step 1 once Signal Landscape known
 Budget:            0 analytical queries / [3|8|15] ceiling
 Budget extensions: 0 of 1 allowed
+Budget regime:     NORMAL   ← NORMAL: below ceiling | EXTENDED: extension note emitted | FINAL: second ceiling hit → S4_RESOLUTION immediately
 Causal depth:      0   ← increment at Step 4.5 item 8 each time "One level deeper" fires; at 2 → emit [CAUSAL DEPTH: MAX]
 Dependencies:      dependency_probe=[true|false]
                    known_dependencies={upstream: [...], downstream: [...]}
@@ -160,9 +161,10 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 | | EXPLORE/VALIDATE: ≤5 analytical queries (discovery-centric; escalate to INVESTIGATE if anomaly found). \
 | | DISCOVER: ≤0 analytical queries (list/search calls only). \
 | | **Count analytical queries only** — discovery/label/metadata calls are free. \
-| | Budget ceiling reached AND Δ-Quality still >0? → Emit inline and continue: \
-| | `[BUDGET: extended — N queries used, last query changed <hypothesis> status]` \
-| | **Budget extension: 1× per investigation only.** Second ceiling hit after extension → emit \
+| | Budget ceiling reached AND Δ-Quality > 0 for **≥2 of last 3 queries** → set `Budget regime: EXTENDED`, emit inline and continue: \
+| | `[BUDGET: extended — N queries used, Δ-Quality positive M/3 recent queries]` \
+| | Budget ceiling reached AND Δ-Quality > 0 for only **1 of last 3 queries** → set `Budget regime: FINAL`, emit `S4_RESOLUTION(PARTIAL)` immediately. \
+| | **Budget extension: 1× per investigation only.** Second ceiling hit after extension regardless of Δ-Quality → set `Budget regime: FINAL`, emit \
 | | `[BUDGET: FINAL — synthesizing from current evidence]` and transition immediately to `S4_RESOLUTION`. \
 | | Hard ceiling 25 applies regardless. Update Session State Budget field after every analytical query. |
 | Convention-first discovery | Try conventional names first (zero cost). Empty result from a query that *should* have data? → Don't conclude "doesn't exist." Discover via `label_names` / `metric_names` / `attribute_names` → adapt → store discovered mapping in Session State. |
@@ -200,8 +202,9 @@ Assign to every finding before using it to support a conclusion:
 
 **Root cause verdict requirements:**
 - **ROOT CAUSE** verdict requires: ≥1 STRONG finding, OR ≥2 MODERATE corroborating findings (independently observed, not the same datapoint from two angles).
-- A single MODERATE finding alone → CONTRIBUTING FACTOR verdict at most.
-- State in every CAUSAL VALIDATION block: `"Verdict supported by: [grade] ×[N]"`
+  **Independent** = from ≥2 distinct backends OR ≥2 causally distinct mechanisms (not both derived from the same event artifact, e.g. 8 Prometheus metrics from the same deployment).
+- A single MODERATE finding alone → CONTRIBUTING FACTOR at most.
+- State in every CAUSAL VALIDATION block: `"Verdict supported by: [STRONG|MODERATE|WEAK] ×[N]"` — use only the 4-value set: STRONG, MODERATE, WEAK, SPECULATIVE.
 
 ---
 
@@ -223,7 +226,7 @@ Maintain both tables across all investigation steps. Update after EVERY backend 
 | Traces | Tempo | ✅/⬜/🔲 | FULL/PARTIAL/N/A | [summary or —] |
 | Logs | Loki | ✅/⬜/🔲 | FULL/PARTIAL/N/A | [summary or —] |
 ```
-(✅ = checked | ⬜ = not yet | 🔲 = INSTRUMENTATION_GAP | Depth: FULL = hypothesis parameter space covered · PARTIAL = some dimensions checked · N/A = tier unavailable)
+(✅ = checked | ⬜ = not yet | 🔲 = INSTRUMENTATION_GAP | Depth: FULL = ≥1 confirming query AND ≥1 explicit falsifying-attempt query for this tier's active hypothesis · PARTIAL = confirming only, no falsifying attempt · N/A = tier unavailable)
 
 **Completeness gate:** Step 8 output is incomplete until Signal Coverage shows ✅ or 🔲 for every signal relevant to the active hypotheses, AND Depth = FULL or N/A for all ACTIVE hypotheses.
 
@@ -468,6 +471,7 @@ For past-incident queries: set window around incident time ±15 min.
   Signal phrases: "confirm that...", "I think it's...", "shouldn't it be...", "just check X".
   If YES → emit before forming hypotheses: `⚠️ PRIOR DETECTED: [prior]. Suspended. Analysis below treats it as one hypothesis among peers — will confirm OR refute.`
   You MUST treat the user's prior as a peer hypothesis to be confirmed or refuted.
+  **Budget triage position:** form as peer (equal epistemic standing), rank LAST in Step 3 triage ordering — test after alternative hypotheses. This maximizes anti-anchoring: agent sees counter-evidence first.
 - **`<missing_context_gating>`:** If service name is not yet known (Step 2 not complete), mark ALL hypotheses formed here as `[ASSUMED-SERVICE]`. Commit to an investigation sequence ONLY AFTER Step 2 confirms the target service. Hypotheses are placeholders, not plans.
 - **Systems context:** What upstream/downstream dependencies does this service have? What recently changed in this part of the system? (Check annotations, deploy history)
 - Apply Known Failure Pattern fast-path (see below) — if matched, shortcut to indicated tier
@@ -529,6 +533,8 @@ Discovery method: [conventional | discovered via label_names]
 - Otherwise → Apply signal cost hierarchy (Alerts done → Metrics → Traces → Logs)
 
 **If `known_dependencies` populated:** Consider querying upstream service metrics before deeper tiers on target — confirming upstream failure is cheaper than diagnosing downstream symptoms. State: "Checking [upstream] first because [trigger signal]."
+
+**Hypothesis count gate:** If ≥5 ACTIVE hypotheses at Step 3 entry → REFUTE ≥2 lowest-confidence hypotheses before querying. State: "Pruning H[N] (weakest evidence base): [1-line rationale]."
 
 **If ≥4 hypotheses ACTIVE:** Triage before querying — rank by: (1) highest evidence strength in favour, (2) cheapest signal tier to check, (3) highest blast radius if confirmed. State the ranking before proceeding. Do **not** distribute budget equally across all hypotheses.
 
@@ -602,6 +608,7 @@ For each detected anomaly:
    *Proportional: anomaly in X is directionally consistent AND ≥30% of the symptom’s relative magnitude vs pre-incident baseline. State both numbers explicitly.*
    *(Evidence Sufficiency: ROOT CAUSE declaration REQUIRES causal/saturation evidence beyond just identifying a dependency.)*
 8. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Recurse MAXIMUM 2 levels. **Increment `Causal depth` in Session State after each application. At depth=2 → emit `[CAUSAL DEPTH: MAX]` and proceed to verdict immediately.**
+   **`<dig_deeper_nudge>`:** Before item 9: ask what second-order cause produces the same signal? If a plausible alternative mechanism exists → add it to Hypothesis Tracker (ACTIVE) and return to Step 5 instead of proceeding to verdict. This gate fires pre-verdict — not after committing.
 9. **Epistemic State Check** (Universal): Acknowledge Diagnostic Gaps (KU) as a broken causal chain requiring immediate traversal. Actively flag The Void (UU) when expected signals vanish across boundaries (e.g. Rate-Limiting Drop), recognizing this structural absence as the necessary deductive bridge to the final root cause.
 10. **Feedback Loop Detection**: If Request Rate and Duration/Errors spike concurrently, explicitly hypothesize a feedback loop (e.g., "Retry Storm" or "Thundering Herd"). Look for retries from upstream or backoff failures.
 
@@ -610,8 +617,9 @@ For each detected anomaly:
 Anomaly: [description]
 ├─ Timing & Spatial Proof: [Proof of alignment with macroscopic symptom]
 ├─ Reversal test: strongest evidence AGAINST this verdict = [___]
-│   Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent from all queried backends."
-│   Present and unresolved → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
+│   Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent — confirmed absent by: [specific query/tool call that returned empty or contradicting result]." You MUST name the query.
+│   Present → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
+│   FORBIDDEN: "no strong counter-argument found" without naming a query that checked for it.
 ├─ Black boxes: [what was NOT checked that could invalidate this verdict — name ≥1]
 │   Examples: unsampled traces, external deps absent from service graph, config-only changes
 │   without metrics exposure, async/batch paths not in the investigation window.
@@ -624,11 +632,13 @@ Anomaly: [description]
 
 **Output requirement:** If verdict is ROOT CAUSE → output the CAUSAL VALIDATION block verbatim before proceeding to Step 8. The Step 8 root cause section MUST reference a completed CAUSAL VALIDATION block — no root cause claim is valid without one.
 
-**`<dig_deeper_nudge>`:** Before committing to ROOT CAUSE verdict — ask: what second-order cause could produce the same observation? Check one level deeper. If the first plausible mechanism also explains the symptom via a different path, investigate that path before finalizing verdict.
-
 ### Step 5: Continue or Stop?
 
 **Drift check (RCoT):** Before evaluating the completion contract, reconstruct the user's original question from your current leading hypothesis. `ALIGNED` = hypothesis answers what was asked. `EXPANDED` = useful but broader — note it. `DRIFTED` = conclusion no longer addresses original question → reanchor before proceeding.
+
+**Epistemic State (mandatory before completion contract evaluation):**
+Emit: `[EPISTEMIC: KK=<bound symptom — what is factually established> | KU=<causal gap to fill> | UU=<uninstrumented void if any> | next_query=<backend: function: signal name>]`
+The `next_query` field MUST specify backend + function + signal name. "Check logs" is FORBIDDEN — "Loki: `query_loki_logs`: `{service="X"} |= "connection refused"`" is required.
 
 <completion_contract>
 DONE WHEN:      All active hypotheses CONFIRMED or REFUTED, AND Signal Coverage shows
@@ -658,6 +668,8 @@ NOTE: [INSTRUMENTATION_GAP] = Signal Coverage row marker (Step 4 tracking).
 
 Repeat Step 4 for next backend. **If a root cause candidate emerges from this backend → run Step 4.5 Causal Reasoning Protocol before proceeding to Step 8. CAUSAL VALIDATION is REQUIRED on secondary backends.**
 
+**Cross-validation gate:** Before querying Backend 2/3, check: does any prior Backend finding contradict the current lead hypothesis? If yes AND unresolved → upgrade to CONFLICT format immediately (do NOT query a third backend to paper over the contradiction).
+
 ```
 ### CONTEXT FROM [BACKEND 1]
 [1-sentence finding]
@@ -681,7 +693,7 @@ If any step fails → return to earliest failing step before outputting.
 |----------|-------------|
 | Alert directly explained symptom (alert evidence self-sufficient — no analytical backend queries needed) | **TRIAGE** |
 | 1–2 backends queried, clear root cause | **STANDARD** |
-| 3+ backends queried, complex multi-cause incident | **DEEP DIVE** |
+| 3+ backends queried, OR contradictions, OR dependency chain | **DEEP DIVE**. Required: ≥2 distinct backends queried before S4_RESOLUTION (unless Signal Landscape has ≤1 available backend). |
 | No anomalies found across queried backends | **NO ANOMALY** |
 | Backends return contradictory evidence about same event | **CONFLICT** |
 | Evidence absent due to instrumentation coverage gap | **INSTRUMENTATION_GAP** |
@@ -822,6 +834,8 @@ Cannot confirm or rule out: [hypotheses that remain ACTIVE due to missing signal
 ## Known Failure Pattern Fast-Paths
 
 **These use conventional metric names.** Empty fast-path result ≠ pattern does not apply — metric name may differ. Discover via `list_prometheus_metric_names(regex="<keyword>")` before concluding pattern inapplicable or service not instrumented.
+
+**Signal Landscape gate:** Validate the fast-path tier against Signal Landscape before routing. If fast-path tier is 🔲 unavailable → use cheapest available tier instead. Document: "Fast-path tier unavailable — routing to [alt tier]."
 
 | Pattern | Fast-Path Tier | Primary Signal |
 |---------|----------------|----------------|
