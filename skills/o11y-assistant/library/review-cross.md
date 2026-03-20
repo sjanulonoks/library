@@ -28,7 +28,7 @@ Shared pattern: [root cause]
 
 ### 2b — Cascade Patterns
 Identify investigations where different services share overlapping `date` + inferred time windows.
-A **cascade** = svc-A failed AND svc-B was investigated within the same UTC day.
+A **cascade** = svc-A failed AND svc-B was investigated within ±4 hours of each other (measured by `date` fields). If dates are day-only (no time component) → fall back to same UTC day.
 
 For each cascade detected:
 - Count frequency: how many times has this pair co-occurred?

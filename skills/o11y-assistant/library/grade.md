@@ -54,6 +54,10 @@ delta_quality_zeros: <N>
 user_verdict: <correct|partial|wrong|unknown>
 black_boxes: [<text>, ...]
 resolution_applied: <text|unknown>
+history_used: <true|false>     # was --history active and patterns loaded?
+history_hit: <true|false|n/a>  # true = historical pattern was the confirmed root cause
+                                # false = historical pattern was refuted, different cause found
+                                # n/a = --history not used or no patterns available
 upstream_causes: [<service-name>, ...]
 downstream_affected: [<service-name>, ...]
 tripartite:
@@ -63,3 +67,13 @@ tripartite:
 ```
 
 **Uniqueness rule:** If an entry with the same `investigation_id` exists, overwrite it (idempotent re-grade).
+Additionally, before writing: if an entry with the same `date` (±1 hour) AND same service exists, treat as duplicate — overwrite the older entry. Emit: `[GRADE: overwriting prior entry from same session — same service+date]`.
+
+## Phase 5: Pending Verdict Recovery
+
+When --grade runs and the resolutions file contains an existing entry with `user_verdict: unknown`:
+- If that entry is from a **previous conversation about the same service** → re-prompt:
+  > "Previous investigation [date] for [service] has pending verdict. Now that more time has passed: was the root cause correct? (yes / partially / no / still unknown)"
+- If user answers → overwrite `user_verdict` in the existing entry.
+- If user says "still unknown" or declines → no change. Entry remains as-is.
+- Do NOT re-prompt for entries older than 30 days — treat as expired. Mark `user_verdict: expired`.

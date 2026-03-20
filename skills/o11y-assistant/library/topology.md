@@ -53,6 +53,21 @@ Extract per-entry:
 ## Step 3: Output
 
 Emit the TOPOLOGY MAP in the response.
+
+**Structured persistence:** After emitting the map, write a structured summary to `topology/<service>.md` for consumption by the investigation DFA (Step 1 Topology Shortcut):
+```markdown
+## Topology — <service> — updated: <UTC> — entries: N
+### Upstream (causal)
+| Service | Causal Count | Confidence |
+|---------|-------------|------------|
+| svc-A   | 3           | HIGH       |
+### Downstream (affected)
+| Service | Affected Count | Confidence |
+|---------|---------------|------------|
+| db-main | 5             | HIGH       |
+```
+This file is read by Step 1 when `dependency_probe=true` as an alternative to the Dependency Discovery Cascade.
+
 Offer: "Run `--review <service>` to compact the prose entries, or start a new investigation with `--history` to use this topology as a hypothesis seed."
 
 ## Notes

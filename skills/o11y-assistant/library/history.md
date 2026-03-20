@@ -21,7 +21,8 @@ Compute `new_entries = M - N`.
 
 - If `new_entries ≥ 5` → emit `[HISTORY: Distilled Patterns stale by N entries — auto-triggering --review first]` and invoke --review protocol before continuing.
 - If Distilled Patterns section missing AND total raw entries ≥ 5 → same trigger.
-- If `new_entries < 5` OR total < 5 → proceed directly.
+- **Verdict-sensitive trigger:** If `new_entries ≥ 3` AND any new entry has `user_verdict: wrong` → trigger --review even below the ≥5 threshold. Emit: `[HISTORY: correction detected in recent entries — auto-triggering --review to update patterns]`. Correctional information must propagate faster than nominal patterns.
+- If none of the above triggers fire → proceed directly.
 
 ## Interpretation
 

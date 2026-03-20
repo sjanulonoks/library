@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.61
+version: 0.62
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -496,6 +496,7 @@ For past-incident queries: set window around incident time ±15 min.
 - **Ask yourself:** "If my first hypothesis is wrong, what would the evidence look like?" — this shapes what to query.
 - **`--history` active?** Load `resolutions/<service>.md`. **If file does not exist:** emit `[HISTORY: no prior sessions for <service> — operating without historical context]` and proceed without historical seeds (do NOT set `history_pending=true`; file will not appear in Step 2). If file exists: if it has a `## Distilled Patterns` section (written by `--review`), use patterns directly. Otherwise scan most recent 5 entries. Add most recent historical root cause as hypothesis. MUST form ≥1 contradicting hypothesis ("what if it's NOT [past cause]?"). Past **blind spots** and **user corrections** are highest-priority hypothesis seeds. If service unknown pre-Step 2, defer: set `history_pending=true` in Session State, load after Step 2 resolves service name. History informs — never shortcuts discovery. @see library/history.md
 - **Dependency signal check:** If ANY present → set `dependency_probe=true` in Session State: (1) user mentions upstream/downstream/cascading/dependency or names multiple services, (2) cross-service alerts firing in Step 0.5, (3) --history shows past multi-service causes, (4) dashboards reference multiple services, (5) multi-service deploys in annotations. Add hypothesis: "upstream dependency may have caused symptom in [target service]."
+  **Topology shortcut:** If `dependency_probe=true` AND `resolutions/<service>.md` exists with YAML grade-entries containing `upstream_causes` or `downstream_affected` fields → extract known dependencies directly. State: `[TOPOLOGY SHORTCUT: upstream=[list], downstream=[list] from N grade entries]`. Store in Session State `known_dependencies`. Skip Dependency Discovery Cascade at Step 2 unless trace data contradicts these known dependencies.
 - **Set Mode in Session State (INVESTIGATE paths):**
   TRIAGE → firing alert fully explains symptom → exit to Step 8 directly (0 analytical queries).
   DEEP DIVE → ≥3 backends expected, multi-service scope, or contradicting hypotheses from the start.
@@ -537,7 +538,7 @@ Discovery method: [conventional | discovered via label_names]
 
 **Name mismatch across backends?** → See Cross-System Service Correlation below.
 
-**If `dependency_probe=true`:** Apply Dependency Discovery Cascade (Appendix D). Store results in Session State as `known_dependencies`.
+**If `dependency_probe=true`:** If Session State `known_dependencies` already populated via Topology Shortcut (Step 1) → skip Dependency Discovery Cascade. Otherwise apply Dependency Discovery Cascade (Appendix D). Store results in Session State as `known_dependencies`.
 
 ### Step 3: Determine Investigation Sequence
 
@@ -851,6 +852,11 @@ Cannot confirm or rule out: [hypotheses that remain ACTIVE due to missing signal
 **RULE:** Destructive actions REQUIRE explicit human confirmation via --ask-user.
 
 **`--grade` active?** After outputting Step 8, invoke the grade protocol (@see library/grade.md): self-assess from conversation context, ask user for outcome verdict, append quality block to `resolutions/<service>.md`.
+
+**Provisional grade capture:** Emit at the END of Step 8 output (before --grade Phase 2 user prompt):
+  `[PROVISIONAL GRADE: outcome=<CONFIRMED_RCA|PARTIAL_RCA|NO_RCA> evidence=<grade> queries=<N> service=<service>]`
+  This block can be manually appended to `resolutions/<svc>.md` if conversation terminates before Phase 2.
+  When --grade Phase 2 runs, it supersedes the provisional block.
 
 ---
 

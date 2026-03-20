@@ -18,6 +18,7 @@ Count and categorize from all grade entries (YAML Phase 4 blocks where available
 - **Correction anti-weighting** — identify entries where `user_verdict: wrong`. For each:
   - Tag root cause as `Invalidated +1`
   - If `Invalidated / Confirmed ≥ 0.3` → mark pattern `[PARTIAL: N invalidations]`
+- **Unknown verdict exclusion** — entries with `user_verdict: unknown` or `user_verdict: expired` are EXCLUDED from Confirmed/Invalidated counts. They count toward total investigations (M) but NOT toward pattern confidence. Emit: "N entries excluded (verdict unknown/expired)"
 - **Time-decay weighting** — for each root cause pattern, compute:
   ```
   Weight = Confirmed × RecencyFactor
@@ -68,6 +69,10 @@ Rewrite `resolutions/<service>.md` with:
    | 1    | ...        | ...     | ...           | N         | M           | W.W    | YYYY-MM-DD |
    ```
    Patterns marked `[PARTIAL: N invalidations]` are included but visually flagged.
+
+   **Pattern retirement rule:**
+   - If `Invalidated > Confirmed` AND `Confirmed ≤ 2` → REMOVE pattern from Distilled Patterns table entirely. Emit: `[PATTERN RETIRED: '{Root Cause}' — Invalidated N > Confirmed M — removed from seeding pool]`. Raw entries in resolutions file are preserved for auditability.
+   - If `Invalidated > Confirmed` AND `Confirmed > 2` → keep in table but mark `[UNRELIABLE: Invalidated N > Confirmed M]`. --history treats `[UNRELIABLE]` patterns same as CONFIDENCE: LOW — skip Structured Contrast Protocol.
 
 2. Deduplicated raw entries below — merge investigations that share the same root
    cause AND same Trigger into a single entry, keeping:
