@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.65
+version: 0.65.1
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -150,7 +150,7 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 | Time discipline | Default: last 15 min. Expand only if justified — state why. |
 | Evidence-based conclusions | Root cause = tool evidence. OR state "no root cause found". |
 | No blind queries | Always discover labels before constructing queries. |
-| Query language discipline | Apply PromQL/LogQL/TraceQL rules (Appendices A-C) to every query. |
+| Query language discipline | Apply PromQL/LogQL/TraceQL rules (@see library/query-rules.md) to every query. |
 | Context-Mode Mandate | **FORBIDDEN:** Reading massive raw payloads (high-cardinality logs/traces) directly into context. You MUST process bulky datasets inside the sandbox using Context-Mode `ctx_batch_execute` or `ctx_execute` to filter noise before returning the summary. |
 | Query budget | **Primary stop: Δ-Quality (Step 5).** Numeric ceilings are circuit breakers only. \
 | | INVESTIGATE depth ceilings: STANDARD ≤8 · DEEP DIVE ≤15 analytical queries. \
@@ -406,11 +406,11 @@ For past-incident queries: set window around incident time ±15 min.
 3. **Parallel calls (both safe):**
    - `list_alert_rules(datasourceUid=..., limit=1000)` → Filter by `state="firing"` (client-side)
    - `get_annotations(From=<start_ms>, To=<end_ms>)` → deployment markers, maintenance windows
-3. **Alert quality check:** Weigh recently-transitioned `firing` alerts higher than long-standing or high-frequency alerts. Check `for` duration — a `1m` alert fires on noise, a `15m` alert fires on sustained issues.
-4. Note severity impression: `Severity: [LOW/MEDIUM/HIGH/CRITICAL]` (from alert state + blast radius). Store in Session State.
+4. **Alert quality check:** Weigh recently-transitioned `firing` alerts higher than long-standing or high-frequency alerts. Check `for` duration — a `1m` alert fires on noise, a `15m` alert fires on sustained issues.
+5. Note severity impression: `Severity: [LOW/MEDIUM/HIGH/CRITICAL]` (from alert state + blast radius). Store in Session State.
    **Annotation candidate shortcut:** If an annotation (deploy/config/restart) has timestamp < symptom onset → add to Session State: `annotation_candidate: {type: "deploy", time: "<ts>", label: "<text>"}`. In Step 4.5, inject into `Timing & Spatial Proof`: "Annotation `<label>` at `<ts>` precedes symptom by ΔT." This seeds — but does not conclude — temporal causality.
 
-5. **Decision:**
+6. **Decision:**
    - Firing alerts found? → Correlate with symptoms. Use alert labels as service discovery seed. If alerts fully explain symptom → Step 8 (TRIAGE).
    - No alerts? → Check annotations; proceed to Step 1.
    - **Known instrumentation gaps in Session State?** If `instrumentation_gaps` is non-empty AND the gap's signal tier is now available in Signal Landscape → probe the gap first in Step 4 and note: `[GAP RECHECK: previously absent, now instrumented]`. If still absent → confirm gap persists, skip.
@@ -476,7 +476,7 @@ Discovery method: [conventional | discovered via label_names]
 
 **Name mismatch across backends?** → See Cross-System Service Correlation below.
 
-**If `dependency_probe=true`:** If Session State `known_dependencies` already populated via Topology Shortcut (Step 1) → skip Dependency Discovery Cascade. Otherwise apply Dependency Discovery Cascade (Appendix D). Store results in Session State as `known_dependencies`.
+**If `dependency_probe=true`:** If Session State `known_dependencies` already populated via Topology Shortcut (Step 1) → skip Dependency Discovery Cascade. Otherwise apply @see library/deps.md. Store results in Session State as `known_dependencies`.
 
 ### Step 3: Determine Investigation Sequence
 
@@ -503,7 +503,7 @@ Discovery method: [conventional | discovered via label_names]
 1. Resolve datasource UID [from Session State or `list_datasources`]
 2. Discover labels (label_names → label_values) — skip if already in Session State from Step 2
 3. Complete Query Plan — classify intent, select function, document plan
-4. Apply query language checklist (Appendix A/B/C) — rewrite non-compliant patterns
+4. Apply query language checklist (@see library/query-rules.md) — rewrite non-compliant patterns
 5. **Lag-Aware Triage:** When executing initial discovery queries, force a `[T0 - 15m, T0 + 5m]` sliding window. Query exact minute ranges ONLY AFTER isolating a specific spike, as pipeline ingestion latency will cause false negatives.
 6. Execute query with correct type (Instant for values, Range for trends)
 7. **Fidelity Check:** Before declaring an absence of data, check for telemetry sampling or rate-limiting warnings in output (if available). If fidelity is suspected to be degraded, mark findings as `[LOW-FIDELITY: Missing data possible]`.
@@ -520,15 +520,7 @@ Discovery method: [conventional | discovered via label_names]
     Example: `Error rate 4.7% [src: query_prometheus expr="rate(http_errors[5m])" → 0.047]`
     UNGROUNDED = finding emitted without src tag. Pre_output_verification Gate 2 checks for src tags.
 
-#### Backend-Specific Notes
-
-**Prometheus:** Start with `up{<service_label>="<svc>"}` (use label from Session State service mapping) to confirm service exists. Empty? → convention-first discovery: try `job`, `service`, `app` via `list_prometheus_label_values`. Step ≥ scrape interval (start with 60s). Use `query_prometheus_histogram` for percentiles. **Baseline:** For key metrics, compare across two horizons:
-- **Trend** (is it worsening?): `offset 5m` → `offset 15m` → `offset 45m` — shows direction within the incident
-- **Seasonal baseline** (is this abnormal?): `offset 7d` / `offset 14d` — same day-of-week comparison. Avoid `offset 1d` (weekend/weekday seasonality misleads).
-
-**Loki:** `query_loki_stats` MANDATORY before broad pulls (>1M entries → narrow first). Start limit=10, expand cautiously. Direction: "backward" (newest first) for recent events.
-
-**Tempo:** Identify search vs metrics query type. Latency: `duration > 500ms`. Errors: `status = error`. For large datasets: use metrics aggregations instead of search.
+**Backend-specific guidance:** @see library/tools.md — each backend section includes usage notes, mandatory checks, and baseline strategies.
 
 #### After Each Backend
 
@@ -543,7 +535,7 @@ Discovery method: [conventional | discovered via label_names]
   If any applies → note inline: `[TEMPORAL ASSUMPTION: <X> treated as current — unverified]`
 - If anomaly found but causal validation (Step 4.5) returns SYMPTOM → **pivot upstream:**
   1. If `known_dependencies` in Session State → pivot to most likely upstream (skip re-discovery)
-  2. Otherwise → apply Dependency Discovery Cascade (Appendix D)
+  2. Otherwise → apply @see library/deps.md
   3. Also check: log error messages for failing service/host names (e.g., "connection refused to auth-service:8080")
   Store discovered deps in Session State. Async/infrequent deps may not appear.
   → Pivot investigation to most likely upstream service
@@ -727,7 +719,7 @@ CONFLICT:   Selection rule: metric≠trace → cardinality; timestamp misalign �
 | Skip Tier 0 (alerts/annotations) | **FORBIDDEN** — cheapest tier is mandatory; empty alert list is itself evidence |
 | Root cause without CAUSAL VALIDATION | **FORBIDDEN** — no root cause claim valid without a completed CAUSAL VALIDATION block |
 
-*Specific query-language anti-patterns (PromQL/LogQL/TraceQL) → see Appendices A–C.*
+*Specific query-language anti-patterns (PromQL/LogQL/TraceQL) → @see library/query-rules.md.*
 
 ---
 
