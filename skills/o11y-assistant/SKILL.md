@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.68
+version: 0.69
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -422,7 +422,6 @@ For past-incident queries: set window around incident time ±15 min.
 
 ### Step 1: Interpret & Hypotheses
 
-- **SPEED MANDATE (Universal Diagnostic Collapse):** Skip text-heavy Step 1 Hypotheses & Step 3 Query Plans entirely on standard alerts. Execute a Concurrent Holographic Probe (parallel calls across Upstream, Downstream, Internal, Infra) in Step 4. The raw data matrices provide deductive answers without sequential guessing.
 - Restate user issue in 1 sentence
 - **Extract Primary Constraint:** Identify immutable bounds in the user prompt (e.g., `user_id=123`, `time=14:00 UTC`). Add this to the Session State `Primary Constraint:` field. If the prompt is generic ("system is broken"), set to `[None provided]`.
 - **Motivated Reasoning check:** Does the user's phrasing imply a preferred conclusion?
@@ -500,13 +499,30 @@ Discovery method: [conventional | discovered via label_names]
 
 **State sequence before querying. This step is MANDATORY.**
 
+### Step 3.5: Execution Mode & Escalation Contract
+
+State one line before the first analytical query:
+`Execution mode: [DISCOVERY PARALLEL | ANALYTICAL SEQUENTIAL]`
+
+- `DISCOVERY PARALLEL` is allowed only for Tier 0/1 discovery, metadata, label resolution, health checks, and volume-estimate calls.
+- `ANALYTICAL SEQUENTIAL` is required for any query that can change a Hypothesis Tracker state or produce a Step 8 finding.
+- Composite logic inside one query is allowed. Simultaneous analytical queries across backends are forbidden.
+- This accepts some DEEP DIVE wall-clock cost in exchange for a simpler and less contradictory execution contract; optimize within a query, not by parallelizing analytical queries.
+
+Escalate to a more expensive tier only when one of the following is true:
+1. The current tier produced a named discriminator that the next tier uniquely resolves (`route`, `tenant`, `downstream`, `trace_id`, `host`, `error class`).
+2. A Symptom Override already selected that higher tier at Step 3 entry.
+3. The current tier is blocked by an instrumentation or sampling ceiling, and the next tier answers a different question.
+
+When escalating, state:
+`Escalation: Tier N → Tier N+1 because [discriminator or unanswered question]`
+
 **CRITICAL:** Before querying each backend, complete Query Plan.
 
 ### Step 4: Query Backend
 
 #### Common Pattern (All Backends)
 
-- **SPEED MANDATE (Holographic Probes):** Always query MECE boundaries concurrently via parallel tool calls. NEVER sequence analytical queries.
 1. Resolve datasource UID [from Session State or `list_datasources`]
 2. Discover labels (label_names → label_values) — skip if already in Session State from Step 2
 3. Complete Query Plan — classify intent, select function, document plan
@@ -516,16 +532,21 @@ Discovery method: [conventional | discovered via label_names]
 7. **Fidelity Check:** Before declaring an absence of data, check for telemetry sampling or rate-limiting warnings in output (if available). If fidelity is suspected to be degraded, mark findings as `[LOW-FIDELITY: Missing data possible]`.
 8. **`<tool_persistence_rules>`:** A first empty result MUST trigger persistence protocols. Retry with:
    (a) alternate label/metric/attribute name, (b) broader time range (2×) — **run volume estimate first** (`query_loki_stats` for logs, `count_over_time` for metrics) before expanding; if volume is low, expand range rather than label, (c) label discovery fallback.
-   (d) **Void Proof:** If persistent 0 results, query backend health metrics (e.g., Loki stats, Tempo up status). If pipeline is unhealthy/dropping data, mark `[AMBIGUOUS VOID]` instead of NO ANOMALY.
-   (e) **5-Signal Checkpoint:** After every 5 analytical queries without a ROOT CAUSE, emit:
-   `[CHECKPOINT] State=<S0-S4> | Budget=<N/ceil> | Lead=<H#, grade> | Gap=<what next query changes> | Query=<backend: type>`
-   This forces DFA state awareness and hypothesis focus before the next query.
-   ONLY after 2+ strategies exhausted → mark `[INSTRUMENTATION_GAP]` in Signal Coverage + continue.
+    (d) **Void Proof:** If persistent 0 results, query backend health metrics (e.g., Loki stats, Tempo up status). If pipeline is unhealthy/dropping data, mark `[AMBIGUOUS VOID]` instead of NO ANOMALY.
+    (e) **5-Signal Checkpoint:** After every 5 analytical queries without a ROOT CAUSE, emit:
+    `[CHECKPOINT] State=<S0-S4> | Budget=<N/ceil> | Lead=<H#, grade> | Gap=<what next query changes> | Query=<backend: type>`
+    This forces DFA state awareness and hypothesis focus before the next query.
+    ONLY after 2+ strategies exhausted → mark `[INSTRUMENTATION_GAP]` in Signal Coverage + continue.
 9. Analyze: trend, spike, anomaly
-10. Extract 1–5 key findings → **update Hypothesis Tracker + Signal Coverage**
-    Each finding MUST include inline source tag: `[src: <tool_name> expr/query="..." → <key value>]`
-    Example: `Error rate 4.7% [src: query_prometheus expr="rate(http_errors[5m])" → 0.047]`
-    UNGROUNDED = finding emitted without src tag. Pre_output_verification Gate 2 checks for src tags.
+10. **Localization gate:** Before escalating beyond the current tier or using this anomaly in Step 4.5, localize it as specifically as the current signal allows:
+    - `When:` exact spike window or `global/steady`
+    - `Where:` service, dependency, host, zone, or `unlocalized`
+    - `Cohort:` route, tenant, version, shard, endpoint, or `none visible`
+    If the anomaly remains unlocalized, state that explicitly and do not escalate unless Step 3.5 condition (2) or (3) applies.
+11. Extract 1–5 key findings → **update Hypothesis Tracker + Signal Coverage**
+     Each finding MUST include inline source tag: `[src: <tool_name> expr/query="..." → <key value>]`
+     Example: `Error rate 4.7% [src: query_prometheus expr="rate(http_errors[5m])" → 0.047]`
+     UNGROUNDED = finding emitted without src tag. Pre_output_verification Gate 2 checks for src tags.
 
 **Backend-specific guidance:** @see library/tools.md — load backend section before querying. **Tempo sampling rule (inline):** `with(sample=true)` MUST appear at END of pipeline, after the last pipe stage: `{ selector } | rate() with(sample=true)` ✅ — NOT after selector alone: `{ selector } with(sample=true) | rate()` ❌. If a TraceQL query errors mentioning `with(...)`, correct placement and retry before abandoning sampling.
 
@@ -552,8 +573,6 @@ Discovery method: [conventional | discovered via label_names]
 
 **MANDATORY before declaring root cause. Prevents symptom-as-cause errors.**
 
-- **SPEED MANDATE (Telemetry-Delegated Omni-Queries & D2T2):** Push logical evaluation into the database via composite queries (e.g. `ingress > 0 unless egress > 0`). Let the DB calculate the `[Internal]` vs `[Downstream]` verdict to return a 1-byte payload. Treat outputs as Deterministic Diagnostic Truth Tables (D2T2).
-
 For each detected anomaly:
 
 1. **Constraint Intersection Check** (MANDATORY): `[REVERSAL TEST] - What is strongest argument this finding is a RED HERRING unrelated to Primary Constraint? If empirically sound, STATUS: RED HERRING.` Discard RED HERRINGS.
@@ -567,23 +586,26 @@ For each detected anomaly:
 9. **Epistemic State Check**: Actively flag The Void (UU) when expected signals vanish across boundaries.
 10. **Feedback Loop Detection**: If Request Rate and Duration/Errors spike concurrently, explicitly hypothesize a feedback loop (use CYCLIC_LINK string).
 
-```
+```text
 ## CAUSAL VALIDATION
 Anomaly: [description]
-├─ Timing & Spatial Proof: [Proof of alignment with macroscopic symptom]
-├─ Reversal test: strongest evidence AGAINST this verdict = [___]
-│   Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent — confirmed absent by: [specific query/tool call that returned empty or contradicting result]." You MUST name the query.
-│   Present → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
-│   FORBIDDEN: "no strong counter-argument found" without naming a query that checked for it.
-├─ Black boxes: [what was NOT checked that could invalidate this verdict — name ≥1]
-├─ Cross-signal: [signal type NOT yet queried that answers a different question — Traces→WHO/WHAT, Logs→WHY]
-│   ⬜ in Signal Coverage AND budget≠FINAL → query before verdict. Blocked → state why.
-├─ Tripartite Causality:
-│   ├─ Trigger: [The active force, e.g., Traffic Spike, Deploy, Config Change]
-│   ├─ Vulnerability: [The structural flaw, e.g., Unbounded memory pool, lack of backoff]
-│   └─ Precondition: [Historical catalyst, if applicable, e.g., Data growth over months]
-└─ Verdict: [ROOT CAUSE | CONTRIBUTING FACTOR | SYMPTOM | COINCIDENCE | CAUSAL_LINK | CYCLIC_LINK]
+- Evidence integrity: freshness=[within window|lagged|stale]; sampling=[full|sampled|unknown]; coverage=[complete|partial|gap:<signal>]; basis=[directly observed|partly inferred]
+- Timing & Spatial Proof: [Proof of alignment with macroscopic symptom, including when/where/cohort localization]
+- Reversal test: strongest evidence AGAINST this verdict = [___]
+  Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent — confirmed absent by: [specific query/tool call]." You MUST name the query.
+  Present → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
+  FORBIDDEN: "no strong counter-argument found" without naming a query that checked for it.
+- Black boxes: [what was NOT checked that could invalidate this verdict — name ≥1]
+- Cross-signal: [signal type NOT yet queried that answers a different question — Traces→WHO/WHAT, Logs→WHY]
+  ⬜ in Signal Coverage AND budget≠FINAL → query before verdict. Blocked → state why.
+- Tripartite Causality:
+  - Trigger: [The active force, e.g., Traffic Spike, Deploy, Config Change]
+  - Vulnerability: [The structural flaw, e.g., Unbounded memory pool, lack of backoff]
+  - Precondition: [Historical catalyst, if applicable, e.g., Data growth over months]
+- Verdict: [ROOT CAUSE | CONTRIBUTING FACTOR | SYMPTOM | COINCIDENCE | CAUSAL_LINK | CYCLIC_LINK]
 ```
+
+If `freshness=lagged|stale`, `sampling=sampled|unknown`, or `coverage=partial|gap:*` weakens the decisive link, cap the verdict at `CONTRIBUTING FACTOR` unless another signal closes the gap.
 
 **Output requirement:** If verdict is ROOT CAUSE → output the CAUSAL VALIDATION block verbatim before proceeding to Step 8. The Step 8 root cause section MUST reference a completed CAUSAL VALIDATION block — no root cause claim is valid without one.
 
@@ -642,7 +664,7 @@ Now checking [BACKEND 2]. Service appears as: [label=value]
 
 ### Step 8: Synthesize & Output (Adaptive Depth)
 
-**Remediation Rule & AEC Rule Compilation:** Remediation is fully user responsibility (output NO recommendations). The ultimate output is combining the Causal Graph with the successful TDCE Omni-Query compiled into a permanent Prometheus Recording Rule / Tempo Search Tag, ensuring future $T=0$ negative-latency triggers.
+**Remediation Rule & AEC Rule Compilation:** Remediation is fully user responsibility (output NO recommendations). When the investigation identifies a stable causal predicate, preserve it in the output as a candidate Recording Rule, alert condition, or Tempo search tag grounded in the final Causal Graph and CAUSAL VALIDATION evidence.
 
 **The Self-Healing Clause:** For incidents that show a clear return to baseline within the investigation window, the output MUST identify the exact time of recovery and systematically correlate it with any resolving actions found in annotations (e.g., pod restarts, reverts, auto-scaling).
 
