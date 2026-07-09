@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.67
+version: 0.68
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -27,7 +27,7 @@ reasoning_effort: >
 - Signal Landscape reveals NO recognized signal type at all (all tiers `none` or all datasource types are unrecognizable) — state what IS visible and ask how to proceed
 
 **Flags (user can invoke at any point in conversation):**
-- `--history` → Load `resolutions/<service>.md` at Step 1. Use past outcomes + blind spots as hypothesis seeds. MUST form contradicting hypothesis. @see library/history.md for details.
+- `--history` → Load `resolutions/<service>.md` (or AEC Compiled Rules). If an Autonomic Epistemic Compiler (AEC) rule matches the incident, output the cached graph instantly for T=0 latency. Else, use past blind spots as seeds. @see library/history.md
 - **(DEFAULT) grade active** → After Step 8: invoke grade protocol (@see library/grade.md). Suppress with `--no-grade`.
 - `--review <service>` → Standalone (no active investigation). Analyze accumulated entries, distill patterns, compact-rewrite `resolutions/<service>.md`. @see library/review.md
 - `--review-cross <svc-A> [<svc-B> ...]` → Standalone. Cross-service pattern analysis: shared root causes, cascade patterns, systemic blind spots across multiple services. @see library/review-cross.md
@@ -133,6 +133,7 @@ Tier 4 — Logs                query_loki_logs / equivalent         ★★★★
 - Deployment/infrastructure event → check annotations first
 - Stack trace / log pattern mentioned → start Tier 4
 - Slow dependency / distributed flow → start Tier 3
+- Dimensional question (which endpoint / version / downstream) AND traces available → Tier 3 first (sampling). One query replaces 3–5 Metrics queries.
 - User names specific backend → honor it
 - Signal Landscape shows tier as `none` → skip that tier entirely; mark as 🔲 UNAVAILABLE in Signal Coverage from the start. Omit it entirely from the "checked" list in Step 8 output.
 
@@ -201,6 +202,7 @@ Assign to every finding before using it to support a conclusion:
 **Root cause verdict requirements:**
 - **ROOT CAUSE** verdict requires: ≥1 STRONG finding, OR ≥2 MODERATE corroborating findings (independently observed, not the same datapoint from two angles).
   **Independent** = from ≥2 distinct backends OR ≥2 causally distinct mechanisms (not both derived from the same event artifact, e.g. 8 Prometheus metrics from the same deployment).
+  **Signal diversity:** ROOT CAUSE from 1 signal type when ≥2 are available (⬜ in Signal Coverage) → annotate `[SINGLE-SIGNAL]` in Step 8. Valid but flags reduced confidence.
 - A single MODERATE finding alone → CONTRIBUTING FACTOR at most.
 - State in every CAUSAL VALIDATION block: `"Verdict supported by: [STRONG|MODERATE|WEAK] ×[N]"` — use only the 4-value set: STRONG, MODERATE, WEAK, SPECULATIVE.
 
@@ -214,7 +216,7 @@ Maintain both tables across all investigation steps. Update after EVERY backend 
 ## HYPOTHESIS TRACKER
 | # | Hypothesis | Evidence For | Evidence Against | Strength | Status |
 |---|-----------|-------------|-----------------|----------|--------|
-| 1 | [statement] | [findings] | [findings] | STRONG/MOD/WEAK | ACTIVE(Q0)/CONFIRMED/REFUTED |
+| 1 | [statement] | [findings] | [findings] | STRONG/MOD/WEAK | ACTIVE/CONFIRMED/REFUTED/CAUSAL_LINK/CYCLIC_LINK |
 
 ## SIGNAL COVERAGE
 | Signal | Backend | Status | Depth | Finding |
@@ -403,7 +405,7 @@ For past-incident queries: set window around incident time ±15 min.
 2. **Environment Handshake:** Before deep architectural queries, execute a **volume baseline probe** on ALL available datastores for the target timeframe:
    - Metrics: `query_prometheus(expr="up{}", queryType="instant")` — any result = ONLINE
    - Logs: `query_loki_stats(logql="{}")` — entries > 0 = ONLINE
-   - Traces: `tempo_traceql-metrics-instant(query="count_over_time({} [5m])")` — result > 0 = ONLINE
+   - Traces: `tempo_traceql-metrics-instant(query="count_over_time({} [5m]) with(sample=true)")` — result > 0 = ONLINE
    If any store returns 0 results for baseline traffic → mark `[OFFLINE]`. Query ONLY online datastores in Step 4.
    - *Override Protocol:* If the User Constraint yields 0 anomalous results in the Initial Handshake, assume the user provided the wrong timestamp or service. Auto-expand the time window 4x and strip the service filter.
 3. **Parallel calls (both safe):**
@@ -420,6 +422,7 @@ For past-incident queries: set window around incident time ±15 min.
 
 ### Step 1: Interpret & Hypotheses
 
+- **SPEED MANDATE (Universal Diagnostic Collapse):** Skip text-heavy Step 1 Hypotheses & Step 3 Query Plans entirely on standard alerts. Execute a Concurrent Holographic Probe (parallel calls across Upstream, Downstream, Internal, Infra) in Step 4. The raw data matrices provide deductive answers without sequential guessing.
 - Restate user issue in 1 sentence
 - **Extract Primary Constraint:** Identify immutable bounds in the user prompt (e.g., `user_id=123`, `time=14:00 UTC`). Add this to the Session State `Primary Constraint:` field. If the prompt is generic ("system is broken"), set to `[None provided]`.
 - **Motivated Reasoning check:** Does the user's phrasing imply a preferred conclusion?
@@ -503,6 +506,7 @@ Discovery method: [conventional | discovered via label_names]
 
 #### Common Pattern (All Backends)
 
+- **SPEED MANDATE (Holographic Probes):** Always query MECE boundaries concurrently via parallel tool calls. NEVER sequence analytical queries.
 1. Resolve datasource UID [from Session State or `list_datasources`]
 2. Discover labels (label_names → label_values) — skip if already in Session State from Step 2
 3. Complete Query Plan — classify intent, select function, document plan
@@ -548,22 +552,20 @@ Discovery method: [conventional | discovered via label_names]
 
 **MANDATORY before declaring root cause. Prevents symptom-as-cause errors.**
 
+- **SPEED MANDATE (Telemetry-Delegated Omni-Queries & D2T2):** Push logical evaluation into the database via composite queries (e.g. `ingress > 0 unless egress > 0`). Let the DB calculate the `[Internal]` vs `[Downstream]` verdict to return a 1-byte payload. Treat outputs as Deterministic Diagnostic Truth Tables (D2T2).
+
 For each detected anomaly:
 
-1. **Constraint Intersection Check** (MANDATORY): `[REVERSAL TEST] - What is the strongest possible argument that this finding is a RED HERRING unrelated to the Primary Constraint? If the argument is empirically sound, STATUS: RED HERRING. If the anomaly is a deployment/config change >5m ago but logically triggers the symptom, STATUS: LATENT_PRECONDITION. If the argument relies on assumptions, MATCH.` Discard `RED HERRING` findings and return to source hypothesis.
-2. **Temporal Math (Bounded)**: Calculate explicit `ΔT` (Symptom Time - Anomaly Time). Evaluate against system tolerance bands: `Synchronous: ΔT < 1m`, `Async/Queue: ΔT < 15m`, `Batch: ΔT < 24h`. If `ΔT` violates the band AND is not a `LATENT_PRECONDITION`, status is `COINCIDENCE`.
-3. **Common Cause Check (C Hidden Node)**: Before asserting `A caused B`, proactively disprove `C caused both A and B`. Check shared infrastructure (network layer, hypervisor, database cluster, identity provider). If shared infra degraded simultaneously, C is the root cause.
-4. **Saturation vs Error Distinction**: You MUST NOT declare resource spikes (CPU/Memory/Network/Connections) as root causes unless you explicitly locate saturation evidence (throttling logs, OOMKilled events, connection pool exhaustion errors). High usage without saturation is a symptom, not a cause.
-5. **Breadcrumb Anchors (Structural Keys)**: Hunt for IPs, unique correlation IDs, or framework classes. If a Structural Key is found *inside* a valid constrained log, pivot laterally to map the involved architecture.
+1. **Constraint Intersection Check** (MANDATORY): `[REVERSAL TEST] - What is strongest argument this finding is a RED HERRING unrelated to Primary Constraint? If empirically sound, STATUS: RED HERRING.` Discard RED HERRINGS.
+2. **Temporal Math (Bounded)**: Calculate explicit `ΔT`. If `ΔT` violates tolerance (1m sync, 15m async, 24h batch) AND is not a LATENT_PRECONDITION, status is COINCIDENCE.
+3. **Common Cause Check (C Hidden Node)**: Prove `C caused both A and B` (shared infra) before asserting `A caused B`.
+4. **Saturation vs Error**: High usage without saturation (OOM, throttling) = symptom, not cause.
+5. **Breadcrumb Anchors**: Unique correlation IDs or IP addresses allow lateral pivots across boundaries.
 6. **Cause or Symptom?** — If I fix X, does the original symptom disappear?
-7. **Coincidence check** — Did X start BEFORE the symptom? Is the magnitude proportional?
-   *Proportional: anomaly in X is directionally consistent AND ≥30% of the symptom’s relative magnitude vs pre-incident baseline. State both numbers explicitly.*
-   *(Evidence Sufficiency: ROOT CAUSE declaration REQUIRES causal/saturation evidence beyond just identifying a dependency.)*
-8. **One level deeper (2× max)** — "Why did X happen?" If the answer points to another system, THAT is the root cause candidate. Apply at most twice — if causal chain still leads outward after 2 levels → declare `[SYSTEMIC ROOT CAUSE: N layers]` naming all layers. Recurse MAXIMUM 2 levels. **Increment `Causal depth` in Session State after each application. At depth=2 → emit `[CAUSAL DEPTH: MAX]` and proceed to verdict immediately.**
-   **`<dig_deeper_nudge>`:** Before item 9: ask what second-order cause produces the same signal? If a plausible alternative mechanism exists → add it to Hypothesis Tracker (ACTIVE) and return to Step 5 instead of proceeding to verdict. This gate fires pre-verdict — not after committing.
-   **Causal depth increment (mandatory):** The CAUSAL VALIDATION block MUST include field `Causal depth: N → N+1` when this item fires. A CAUSAL VALIDATION block missing this field is INVALID when One-level-deeper was applied.
-9. **Epistemic State Check** (Universal): Acknowledge Diagnostic Gaps (KU) as a broken causal chain requiring immediate traversal. Actively flag The Void (UU) when expected signals vanish across boundaries (e.g. Rate-Limiting Drop), recognizing this structural absence as the necessary deductive bridge to the final root cause.
-10. **Feedback Loop Detection**: If Request Rate and Duration/Errors spike concurrently, explicitly hypothesize a feedback loop (e.g., "Retry Storm" or "Thundering Herd"). Look for retries from upstream or backoff failures.
+7. **Coincidence check** — Did X start BEFORE symptom? Is magnitude proportional (≥30%)?
+8. **One level deeper (2× max)** — "Why did X happen?" Recurse max 2 levels → emit `[CAUSAL DEPTH: MAX]`. If alternate mechanism exists, add to tracker and return to Step 5. CAUSAL VALIDATION MUST include `Causal depth: N → N+1`.
+9. **Epistemic State Check**: Actively flag The Void (UU) when expected signals vanish across boundaries.
+10. **Feedback Loop Detection**: If Request Rate and Duration/Errors spike concurrently, explicitly hypothesize a feedback loop (use CYCLIC_LINK string).
 
 ```
 ## CAUSAL VALIDATION
@@ -574,13 +576,13 @@ Anomaly: [description]
 │   Present → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
 │   FORBIDDEN: "no strong counter-argument found" without naming a query that checked for it.
 ├─ Black boxes: [what was NOT checked that could invalidate this verdict — name ≥1]
-│   Examples: unsampled traces, external deps absent from service graph, config-only changes
-│   without metrics exposure, async/batch paths not in the investigation window.
+├─ Cross-signal: [signal type NOT yet queried that answers a different question — Traces→WHO/WHAT, Logs→WHY]
+│   ⬜ in Signal Coverage AND budget≠FINAL → query before verdict. Blocked → state why.
 ├─ Tripartite Causality:
 │   ├─ Trigger: [The active force, e.g., Traffic Spike, Deploy, Config Change]
 │   ├─ Vulnerability: [The structural flaw, e.g., Unbounded memory pool, lack of backoff]
 │   └─ Precondition: [Historical catalyst, if applicable, e.g., Data growth over months]
-└─ Verdict: [ROOT CAUSE | CONTRIBUTING FACTOR | SYMPTOM | COINCIDENCE]
+└─ Verdict: [ROOT CAUSE | CONTRIBUTING FACTOR | SYMPTOM | COINCIDENCE | CAUSAL_LINK | CYCLIC_LINK]
 ```
 
 **Output requirement:** If verdict is ROOT CAUSE → output the CAUSAL VALIDATION block verbatim before proceeding to Step 8. The Step 8 root cause section MUST reference a completed CAUSAL VALIDATION block — no root cause claim is valid without one.
@@ -596,6 +598,8 @@ The `next_query` field MUST specify backend + function + label selector/attribut
 <completion_contract>
 DONE WHEN:      All active hypotheses CONFIRMED or REFUTED, AND Signal Coverage shows
                 ✅ or 🔲 for every signal (no ⬜ remains) relevant to active hypotheses.
+                SIGNAL DEFAULT: For STANDARD/DEEP DIVE, ALL signals in Signal Landscape are
+                relevant unless explicitly excluded with stated reason.
 BUDGET FINAL
 OVERRIDE:       If `Budget regime = FINAL` → proceed to Step 8 immediately.
                 This overrides ALL KEEP GOING conditions. State: `[BUDGET FINAL: synthesizing from current evidence]`
@@ -638,7 +642,7 @@ Now checking [BACKEND 2]. Service appears as: [label=value]
 
 ### Step 8: Synthesize & Output (Adaptive Depth)
 
-
+**Remediation Rule & AEC Rule Compilation:** Remediation is fully user responsibility (output NO recommendations). The ultimate output is combining the Causal Graph with the successful TDCE Omni-Query compiled into a permanent Prometheus Recording Rule / Tempo Search Tag, ensuring future $T=0$ negative-latency triggers.
 
 **The Self-Healing Clause:** For incidents that show a clear return to baseline within the investigation window, the output MUST identify the exact time of recovery and systematically correlate it with any resolving actions found in annotations (e.g., pod restarts, reverts, auto-scaling).
 
