@@ -1,6 +1,6 @@
 ---
 name: finops-investigation-assistant
-version: "0.10"
+version: "0.11"
 description: >
   ALWAYS USE when investigating AWS cost anomalies, bill spikes, optimization
   opportunities, commitment gaps, or any multi-account/multi-service cost pattern
@@ -98,6 +98,8 @@ Pattern type:         [unknown | one-off spike | step-change | gradual drift | r
 Continuity state:     [none | provisional | ambiguous-deferral | authoritative | purged]
 Continuity record(s): [none | record ID(s)]
 Tolerance state:      [none | active-match | expired-drift | expired-ttl]
+Action-history state: [none | no-match | recommended-only | confirmed-applied | user-confirmed-rejected]
+Pending action confirmations: []
 Residual delta:       [unknown | $N | DATA_UNAVAILABLE]
 Residual status:      [none | immaterial | material]
 Preventability:       [TBD -> waste | intentional growth | protective redundancy | allocation artifact]
@@ -173,6 +175,15 @@ Use this discipline:
 - **Marginal cost:** AWS Cost Explorer request metering (approximately
   `$0.01/request` for the primary billing view, higher per-source cost for
   custom billing views) plus engineer attention cost.
+- **Allocation rule:** If multiple candidate next-queries compete, rank them by
+  expected decision delta per marginal cost.
+- **Protected disconfirmer rule:** If the highest-value disconfirmer is more
+  expensive than a cheaper confirming query, it still gets the next slot ONLY
+  when it could plausibly flip the current verdict, owner, or recommended action.
+  If it cannot flip any of those three, no protected slot exists and normal
+  cost-ranking applies.
+- **Same budget accounting:** Protected disconfirmers draw from the same budget
+  ceiling as every other query. There is no separate accounting path.
 - **Residual priority input:** Material residual delta from Step 5 raises the
   stakes the gate evaluates, but does NOT override the gate.
 
@@ -181,6 +192,11 @@ Emit before every gated decision:
 ```
 ## CONTINUATION GATE
 Checkpoint:         [S0.5 entry | pre-query | residual-bounded]
+Current lead:       [leading hypothesis or residual focus]
+Candidate set:      [ranked next-query candidates]
+Protected disconfirmer: [none | query that could flip verdict/owner/action]
+Selected slot:      [chosen next query]
+Slot basis:         [cost-ranked | protected-disconfirmer]
 Next step:          [what the next query or action is]
 Expected delta:     [HIGH | MEDIUM | LOW]
 Marginal cost:      [LOW | MEDIUM | HIGH]
@@ -252,6 +268,8 @@ Read rule at Step 0.5:
 - Fast-path exit is allowed only if the record shows the same shape, same scope,
   same account and service set, within prior materiality band, cadence unchanged,
   and TTL still valid.
+- If the record is `decision_state=DISPUTED_BENIGN` -> do NOT fast-path. Reopen as
+  full RCA or elevated review.
 - If dollar band expands, recurrence cadence changes, a new account or service
   appears, or TTL expires -> classify as `expired evidence`, not a fast-path exit.
 
@@ -259,6 +277,9 @@ Write rule at Step 8:
 - Propose explicitly.
 - Require confirmation before persisting.
 - Emit a visible memory proposal line.
+- If the proposal is rejected, create or update the record immediately with
+  `decision_state=DISPUTED_BENIGN`, increment rejection metadata, and preserve the
+  rejection as durable evidence for the next matching fingerprint.
 
 ### Namespace B - `open_investigations/`
 
@@ -298,10 +319,55 @@ Write rule at Step 8:
 - If continuity remained ambiguous, only persist any newly-created generic
   placeholders with `generic_not_continuity_backed=true`.
 
+### Namespace C - `action_history/`
+
+Purpose: persist normalized recommended-action history across closed and open
+investigations so future oscillation checks can distinguish ordinary cyclicality
+from reversal plausibly caused by a prior recommendation.
+
+Key space:
+- `action_history/[account_scope]/[service_key]`
+
+Top-level fields:
+- `namespace`
+- `history_key`
+- `target_account_scope`
+- `target_service_key`
+- `last_action_at`
+- `action_log`
+
+Read rule at Step 0.5:
+- Read THIRD, after continuity and tolerance.
+- If an entry remains `action_state=RECOMMENDED` and `recommended_at` is older than
+  the current settled window boundary, record it as a pending action confirmation.
+- Do NOT assume application. Ask in Step 8 report output whether it was applied.
+- If no response is given, keep `action_state=RECOMMENDED`.
+
+Write rule at Steps 6-8:
+- Every recommended action emitted anywhere in Steps 6-8 must append or update an
+  `action_log` entry with `action_state=RECOMMENDED` by default.
+- On later user response, update the matching entry to
+  `USER_CONFIRMED_APPLIED` or `USER_CONFIRMED_REJECTED`.
+
+Oscillation eligibility note:
+- Only causally reversible action types may trigger the Oscillation Damping Gate:
+  `RIGHTSIZE`, `PURCHASE_COMMITMENT`, `REALLOCATE`, and `VALIDATE_REDUNDANCY`
+  when the proposed change would alter active spend.
+- `ACCEPT`, `MONITOR`, and `VALIDATE_BEFORE_OPTIMIZE` are observational or
+  non-causal actions and cannot trigger instability classification.
+
 ### Namespace Separation Rule
 
-`tolerance_registry/` and `open_investigations/` must never share keys or
-overwrite each other.
+`tolerance_registry/`, `open_investigations/`, and `action_history/` must never
+share keys or overwrite each other.
+
+Collision rule:
+- `history_key`, `action_log`, and `last_action_at` are reserved to
+  `action_history/`.
+- `coarse_key`, `authoritative_key`, and `continuity_state` remain reserved to
+  `open_investigations/`.
+- Shared generic identifiers such as `namespace`, account identifiers, and service
+  identifiers may repeat intentionally across namespaces.
 
 ---
 
@@ -324,6 +390,7 @@ Skill:              [cost-analysis | investigate-anomaly | cost-optimization-rec
 Lens:               [MONTHLY/DAILY/HOURLY] x [LINKED_ACCOUNT/SERVICE]
 Hypothesis target:  [which hypothesis this tests]
 Matched control:    [sibling account | sibling service | peer cohort | not yet resolved]
+Slot basis:         [cost-ranked | protected-disconfirmer]
 Anti-pattern check: X NOT [wrong approach] because [reason]
 Budget:             [N/ceiling]
 ```
@@ -408,14 +475,20 @@ Current month [MONTH YEAR] excluded - INCOMPLETE.
    - If both continuity and tolerance match -> continuity is authoritative,
      tolerance is supporting context only.
    - If tolerance has drifted or expired -> treat it as expired evidence, not a fast-path exit.
-4. Apply the first **Expected-Value Continuation Gate** checkpoint.
+   - If `decision_state=DISPUTED_BENIGN` -> reopen as full RCA or elevated review.
+4. **Action History Check** under `action_history/`.
+   - If matching entries remain `RECOMMENDED` and are older than the current settled
+     window boundary, record them as pending confirmations for Step 8 output.
+   - Do NOT assume they were applied in this run.
+   - If no matching action-history entry exists at all, default to ordinary cyclicality.
+5. Apply the first **Expected-Value Continuation Gate** checkpoint.
    - If `stop` -> go directly to Step 8 with a lightweight triage verdict.
-5. **If anomaly ID provided:** activate `investigate-anomaly` skill with that ID.
+6. **If anomaly ID provided:** activate `investigate-anomaly` skill with that ID.
    - If it fully explains the symptom -> TRIAGE exit to Step 8.
    - If partial -> add finding to Anomaly Candidates, proceed to Step 1.
-6. **Otherwise:** use `cost-analysis` to check for active anomaly alerts and
+7. **Otherwise:** use `cost-analysis` to check for active anomaly alerts and
    load the MONTHLY x LINKED_ACCOUNT overview (Tier 1 - cheapest baseline).
-7. Emit Signal Landscape:
+8. Emit Signal Landscape:
    ```
    Signal landscape:
      MONTHLY x ACCOUNT  = [available | DATA_UNAVAILABLE]
@@ -430,10 +503,13 @@ Current month [MONTH YEAR] excluded - INCOMPLETE.
      records            = [none | record IDs]
    Tolerance:
      state              = [none | active-match | expired-drift | expired-ttl]
+   Action history:
+     state              = [none | no-match | recommended-only | confirmed-applied | user-confirmed-rejected]
+     pending_confirmations = [none | action IDs]
    Pattern type:
      provisional        = [unknown | one-off spike | step-change | gradual drift | recurring burst | oscillation]
    ```
-8. Any lens marked DATA_UNAVAILABLE -> 🔲 in Signal Coverage.
+9. Any lens marked DATA_UNAVAILABLE -> 🔲 in Signal Coverage.
 
 ### Step 1 - Interpret and Hypotheses
 
@@ -473,6 +549,7 @@ Available lenses:    [list]
 Excluded lenses:     [list + reason]
 Matched controls:    [sibling account | sibling service | peer cohort | unresolved]
 Continuity status:   [none | provisional | ambiguous-deferral | authoritative | purged]
+Action history:      [none | no-match | recommended-only | confirmed-applied | user-confirmed-rejected]
 ```
 
 ### Step 3 - Investigation Sequence
@@ -501,6 +578,10 @@ For every `cost-analysis` skill call:
 
 1. Apply the **Expected-Value Continuation Gate**.
    - If `stop` -> do not make the query; move to Step 5 or Step 8 depending on state.
+   - If multiple candidate next-queries compete, rank by expected decision delta per
+     marginal cost.
+   - If the highest-value disconfirmer could flip verdict, owner, or action, it may
+     take the protected slot under the same budget ceiling.
 2. Complete Query Plan (epistemic state, lens, hypothesis target, matched control,
    anti-pattern check).
 3. Execute via `cost-analysis` skill (serial - one call at a time).
@@ -546,28 +627,53 @@ MANDATORY before declaring any finding as root cause or contributing factor.
    Primary recommendation owner: [first supported origin hop only]
    ```
    If Cluster-First Origin Scope activated, re-root the ledger at the shared-cause lane.
-6. **Signal Conflict Adjudicator** (low priority, but active if the evidence appears):
+6. **Confidence Attenuation Cap:**
+   - Apply automatically on every Step 4.5 pass.
+   - Verdict strength is capped by hop depth and weakest-link evidence quality.
+   - Multiple MODERATE findings across dependent hops do NOT aggregate into a STRONG
+     root-cause claim without direct origin-hop support.
+   - Before any verdict is promoted to ROOT CAUSE, if the cap is not met -> downgrade
+     to CONTRIBUTING FACTOR or PARTIAL.
+7. **Signal Conflict Adjudicator** (low priority, but active if the evidence appears):
    - If Cost Optimization Hub and Compute Optimizer actively disagree
      (example: `rightsizing-eligible` vs `fully-utilized`) -> downgrade to
      `CONTESTED_OPPORTUNITY`.
    - `CONTESTED_OPPORTUNITY` cannot drive the primary recommendation alone.
    - Required action: `validate-before-optimize`, not `optimize-now`.
-7. **Preventability Split:**
+8. **Preventability Split:**
    - `preventable waste` -> cut or rightsize.
    - `intentional growth` -> accept or validate with owner.
    - `protective redundancy` -> accept or validate with resilience owner.
    - `allocation artifact` -> reallocate.
-8. **Verdict:**
+9. **Action Irreversibility Proof Ladder:**
+   - `MONITOR` and `WARN/REVIEW` may ship on weaker proof because they raise attention
+     without directly authorizing a costly or hard-to-reverse action.
+   - `OPTIMIZE_NOW`, `PURCHASE_COMMITMENT`, `VALIDATE_REDUNDANCY` removal, and an
+     `ACTIVE_BENIGN` tolerance declaration require a stronger evidence floor.
+   - If the causal diagnosis is stronger than the action authorization floor, soften the
+     action rather than inflating certainty.
+10. **Oscillation Damping Gate:**
+    - `CONTROL_LOOP_INSTABILITY` may be classified only when ALL are true:
+      1. the matched `action_history/` entry uses a causally reversible action type,
+      2. the target scope matches the current anomaly scope, and
+      3. the reversal begins within the next 2 settled periods after `recommended_at`.
+    - If `action_state=USER_CONFIRMED_APPLIED`, instability may support a
+      validate-and-damp intervention.
+    - If `action_state=RECOMMENDED` or `UNKNOWN`, instability may support
+      `WARN/REVIEW` only.
+    - If no matching `action_history/` entry exists, default to ordinary cyclicality.
+11. **Verdict:**
    - `ROOT CAUSE` = specific isolated driver + mechanism + temporal alignment + matched-control support
    - `CONTRIBUTING FACTOR` = partial driver, no matched-control support, or unclear mechanistic link
    - `SYMPTOM` = this IS the movement, not its cause -> drill to next level
-9. Increment `Causal depth` on SYMPTOM. At depth 2 -> `[CAUSAL DEPTH: MAX]`.
-10. State: `Verdict supported by: [STRONG|MODERATE|WEAK] x[N]`
+12. Increment `Causal depth` on SYMPTOM. At depth 2 -> `[CAUSAL DEPTH: MAX]`.
+13. State: `Verdict supported by: [STRONG|MODERATE|WEAK] x[N]`
 
 Root cause verdict requirements:
 - >=1 STRONG finding, OR >=2 MODERATE findings from >=2 distinct lenses.
 - Single MODERATE alone -> CONTRIBUTING FACTOR at most.
 - No matched-control evidence for the leading hypothesis -> CONTRIBUTING FACTOR at most.
+- Confidence Attenuation Cap must pass before any ROOT CAUSE promotion.
 
 ### Step 5 - Delta-Quality Gate
 
@@ -591,7 +697,8 @@ delta against total observed delta.
 - If residual is material -> feed that fact into the Expected-Value Continuation Gate.
   - If the gate says `stop` -> emit verdict PARTIAL with reason:
     `material residual remains, continuation not worth cost.`
-  - If the gate says `continue` -> open a residual-focused hypothesis and continue.
+  - If the gate says `continue` -> open a residual-focused hypothesis and let it compete
+    for the next slot under the same allocation rule.
 
 **Delta-Quality = ZERO** -> this call added no decision-relevant distinction.
 Do NOT continue in the same direction. Pivot lens or accept current resolution.
@@ -613,15 +720,20 @@ Activate `cost-optimization-recommendations` skill. Execute ladder serially:
    Flag accounts where cost-per-unit is >20% above peer average (if data available).
 
 4. **Preventability framing**
-   Apply the Preventability Split to every optimization action:
-   - waste -> cut or rightsize.
-   - intentional growth -> validate with owner before treating as optimization.
-   - protective redundancy -> validate resilience requirement before any cut.
-   - allocation artifact -> reallocate rather than optimize away.
+    Apply the Preventability Split to every optimization action:
+    - waste -> cut or rightsize.
+    - intentional growth -> validate with owner before treating as optimization.
+    - protective redundancy -> validate resilience requirement before any cut.
+    - allocation artifact -> reallocate rather than optimize away.
 
-5. **Savings Estimate Discipline**
-   Savings estimates are `[INFERENCE]` unless from direct skill data.
-   State assumptions. Never present inferred savings as confirmed figures.
+5. **Action irreversibility application**
+   If evidence is sufficient to raise attention but not sufficient to authorize a
+   direct spend-changing action, emit `MONITOR` or `WARN/REVIEW` instead of a direct
+   optimization command.
+
+6. **Savings Estimate Discipline**
+    Savings estimates are `[INFERENCE]` unless from direct skill data.
+    State assumptions. Never present inferred savings as confirmed figures.
 
 ### Step 7 - Commitment Coverage Protocol (`--commitment` flag)
 
@@ -632,6 +744,8 @@ Activate `cost-optimization-recommendations` skill:
 4. Rank by monthly savings impact.
 5. Per recommendation: account, service, current coverage, target coverage,
    estimated savings, confidence tier (STRONG/MODERATE/WEAK).
+6. If evidence is sufficient to warn but not sufficient to authorize a commitment
+   purchase, soften the action to `MONITOR` or `WARN/REVIEW`.
 
 Step 7 is otherwise unchanged. Its findings still feed the upstream
 Propagation Chain-of-Custody Ledger, tolerance decisions, and Preventability Split.
@@ -651,6 +765,9 @@ Propagation Chain-of-Custody Ledger, tolerance decisions, and Preventability Spl
 - [ ] Pattern type classified for every anomaly
 - [ ] RACE-S applied to root-cause account and service
 - [ ] Matched-control evidence logged or explicitly unavailable
+- [ ] Confidence Attenuation Cap applied before any ROOT CAUSE promotion
+- [ ] Action Irreversibility Proof Ladder applied to every recommendation
+- [ ] Pending action confirmations surfaced when action_history contains stale RECOMMENDED entries
 - [ ] Memory actions logged
 
 ### Memory Write-Back Rules
@@ -659,7 +776,12 @@ Propagation Chain-of-Custody Ledger, tolerance decisions, and Preventability Spl
    - Only if the finding is benign and stable.
    - Emit:
      `[MEMORY PROPOSAL] namespace=tolerance_registry/... confirm-before-persist reason=[why this should suppress future RCA]`
-   - Persist only after explicit confirmation.
+   - Persist as `decision_state=ACTIVE_BENIGN` only after explicit confirmation.
+   - If rejected, create or update the record immediately with
+     `decision_state=DISPUTED_BENIGN`, increment `proposal_count` and
+     `rejection_count`, and write `first_rejected_at`, `last_rejected_at`,
+     `last_rejection_reason`, and `last_decision_at`.
+   - Future matches against `DISPUTED_BENIGN` must reopen as full RCA or elevated review.
 
 2. **Investigation continuity auto-write**
    - If verdict is PARTIAL or budget regime is EXTENDED/FINAL -> auto-write under
@@ -668,6 +790,17 @@ Propagation Chain-of-Custody Ledger, tolerance decisions, and Preventability Spl
      `[MEMORY ACTION] namespace=open_investigations/... action=write status=OPEN reason=[resume later]`
    - If continuity remained ambiguous, write generic placeholders only with
      `generic_not_continuity_backed=true`.
+
+3. **Action history write-back**
+   - For every recommended action emitted anywhere in Steps 6-8, append or update an
+     `action_history/...` entry with `action_state=RECOMMENDED`.
+   - Emit:
+     `[MEMORY ACTION] namespace=action_history/... action=append status=RECOMMENDED reason=[recommended action emitted]`
+   - If Step 0.5 flagged a pending action confirmation, include an explicit report
+     question asking whether the action was applied.
+   - On a later user response, update the matching action entry to
+     `USER_CONFIRMED_APPLIED` or `USER_CONFIRMED_REJECTED`. Without a response, keep
+     it at `RECOMMENDED`.
 
 ### Output Structure
 
@@ -713,10 +846,17 @@ Audience: Engineers and SREs. Full technical detail.
 ## Hypothesis Tracker [final state]
 ## Signal Coverage [final state]
 
+[If pending action confirmations exist:]
+## Action Confirmation Request
+- action_id: [ID]
+- target: [account / service / resource if known]
+- recommended_at: [timestamp]
+- question: Was this recommendation applied? [yes | no | unknown]
+
 ================================================
 METHODOLOGY
 ================================================
-Skill: finops-investigation-assistant v0.10 | Run date: [ISO date]
+Skill: finops-investigation-assistant v0.11 | Run date: [ISO date]
 Windows: HOURLY [exact dates], DAILY [exact dates], MONTHLY [exact dates]
 Service breakdown method: [HOURLY x SERVICE | DAILY x SERVICE fallback | DATA_UNAVAILABLE]
 Mode: [TRIAGE|STANDARD|DEEP DIVE] | Queries: [N/ceiling] | Budget regime: [NORMAL|EXTENDED|FINAL]
@@ -751,6 +891,7 @@ DATA_UNAVAILABLE gaps explained:         [Y/N]
 Estimation prohibition followed:         [Y/N]
 Serial execution maintained:             [Y/N]
 Skills used correctly:                   [Y/N - note any misuse]
+Action-history logging followed:         [Y/N]
 Memory action discipline followed:       [Y/N]
 Overall grade:                           [A | B | C | D]
 Improvement for next run:                [1 sentence]
@@ -861,6 +1002,53 @@ in the same anomaly window: one for EC2 and one for NAT Gateway.
 7. Continue as a new RDS investigation.
 8. Guarantee: no field from the wrong EC2 record leaks into the new RDS run.
 
+## Worked Example Trace 3 - Unconfirmed Prior Action Produces WARN/REVIEW Only
+
+Scenario: a prior recommendation to rightsize an EC2 fleet was written to
+`action_history/` as `RECOMMENDED`, but no user ever confirmed it was applied.
+Two settled periods later, the same account and service show a reversal pattern.
+
+1. Step 8 of the earlier investigation writes:
+   - `action_type=RIGHTSIZE`
+   - `target_account=123456789012`
+   - `target_service=EC2`
+   - `recommended_at=2026-07-01T00:00:00Z`
+   - `action_state=RECOMMENDED`
+2. A future EC2 investigation begins within the next 2 settled periods.
+3. Step 0.5 reads `action_history/123456789012/EC2` and finds the stale
+   `RECOMMENDED` action.
+4. The run records a pending action confirmation and does NOT assume application.
+5. Step 4.5 sees:
+   - action type is causally reversible (`RIGHTSIZE`)
+   - target scope matches
+   - reversal begins within the next 2 settled periods
+6. Oscillation Damping Gate applies.
+7. Because `action_state=RECOMMENDED` rather than `USER_CONFIRMED_APPLIED`, the
+   skill may emit `WARN/REVIEW` only.
+8. It must NOT emit a validate-and-damp intervention yet.
+9. Step 8 asks the user whether the rightsize recommendation was actually applied.
+
+## Worked Example Trace 4 - Single Rejection Persists DISPUTED_BENIGN and Reopens RCA
+
+Scenario: a recurring S3 weekday batch spike is proposed for tolerance once,
+rejected once, and later recurs with the same fingerprint.
+
+1. Step 8 emits a tolerance proposal for fingerprint
+   `S3+recurring-burst+weekday-batch`.
+2. The human rejects the proposal and explains: `still too risky to suppress`.
+3. The skill immediately creates or updates `tolerance_registry/...` with:
+   - `decision_state=DISPUTED_BENIGN`
+   - `proposal_count=1`
+   - `rejection_count=1`
+   - `first_rejected_at` and `last_rejected_at` set
+   - `last_rejection_reason=still too risky to suppress`
+4. The same fingerprint recurs on a later investigation.
+5. Step 0.5 reads the existing tolerance record.
+6. Because `decision_state=DISPUTED_BENIGN`, the skill does NOT fast-path to benign suppression.
+7. The pattern reopens as full RCA or elevated review.
+8. Outcome: one prior rejection is enough to prevent re-proposing the same benign
+   shortcut from scratch.
+
 ## JSON Schema Fragments - Native Memory Namespaces
 
 ### `tolerance_registry/`
@@ -872,6 +1060,7 @@ in the same anomaly window: one for EC2 and one for NAT Gateway.
   "pattern_fingerprint": "service+pattern+window-shape+cadence",
   "record": {
     "status": "ACTIVE",
+    "decision_state": "ACTIVE_BENIGN",
     "account_scope": ["123456789012"],
     "service_scope": ["S3"],
     "pattern_type": "recurring burst",
@@ -888,8 +1077,44 @@ in the same anomaly window: one for EC2 and one for NAT Gateway.
       "new_account_or_service",
       "ttl_expires"
     ],
-    "confirmation_required": true
+    "confirmation_required": true,
+    "proposal_count": 2,
+    "rejection_count": 1,
+    "first_proposed_at": "2026-07-01T00:00:00Z",
+    "last_proposed_at": "2026-07-09T00:00:00Z",
+    "first_rejected_at": "2026-07-01T00:00:00Z",
+    "last_rejected_at": "2026-07-01T00:00:00Z",
+    "last_rejection_reason": "still too risky to suppress",
+    "confirmed_at": "2026-07-09T00:00:00Z",
+    "last_decision_at": "2026-07-09T00:00:00Z"
   }
+}
+```
+
+### `action_history/`
+
+```json
+{
+  "namespace": "action_history/",
+  "history_key": "123456789012+EC2",
+  "target_account_scope": ["123456789012"],
+  "target_service_key": "EC2",
+  "last_action_at": "2026-07-09T00:00:00Z",
+  "action_log": [
+    {
+      "action_id": "act-20260709-ec2-rightsize-01",
+      "source_investigation_key": "open_investigations/123456789012/EC2/2026-07-01_2026-07-03",
+      "action_type": "RIGHTSIZE",
+      "target_account": "123456789012",
+      "target_service": "EC2",
+      "target_resource": "i-abc123",
+      "recommended_at": "2026-07-09T00:00:00Z",
+      "action_state": "RECOMMENDED",
+      "expected_direction": "cost-down",
+      "evidence_tier": "MODERATE",
+      "rationale": "idle fleet identified with matched-control support"
+    }
+  ]
 }
 ```
 
@@ -941,6 +1166,8 @@ in the same anomaly window: one for EC2 and one for NAT Gateway.
   and could promote CONTRIBUTING FACTOR to ROOT CAUSE -> CONTINUE.
 - Residual delta is material and the next daily service cut is cheap enough to likely
   separate waste from allocation artifact -> CONTINUE.
+- An expensive disconfirmer could flip the owner from shared platform to local workload;
+  it wins the protected slot under the same budget ceiling -> CONTINUE.
 
 ### Residual Feeds In But Does Not Override
 
@@ -949,3 +1176,5 @@ in the same anomaly window: one for EC2 and one for NAT Gateway.
 - Residual delta is material and the next query is cheap and action-changing -> CONTINUE.
 - Residual delta is immaterial even if budget remains -> follow the normal gate, not an
   automatic deep-dive reflex.
+- A protected disconfirmer exists but cannot flip verdict, owner, or action -> no protected
+  slot exists; normal cost-ranking applies.
