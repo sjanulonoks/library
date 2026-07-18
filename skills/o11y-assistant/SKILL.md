@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.69
+version: 0.70
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -27,7 +27,7 @@ reasoning_effort: >
 - Signal Landscape reveals NO recognized signal type at all (all tiers `none` or all datasource types are unrecognizable) — state what IS visible and ask how to proceed
 
 **Flags (user can invoke at any point in conversation):**
-- `--history` → Load `resolutions/<service>.md` (or AEC Compiled Rules). If an Autonomic Epistemic Compiler (AEC) rule matches the incident, output the cached graph instantly for T=0 latency. Else, use past blind spots as seeds. @see library/history.md
+- `--history` → Load `resolutions/<service>.md`. If history exists, use recurring patterns, corrections, and blind spots as Step 1 seeds; if missing, emit baseline-mode notice. @see library/history.md
 - **(DEFAULT) grade active** → After Step 8: invoke grade protocol (@see library/grade.md). Suppress with `--no-grade`.
 - `--review <service>` → Standalone (no active investigation). Analyze accumulated entries, distill patterns, compact-rewrite `resolutions/<service>.md`. @see library/review.md
 - `--review-cross <svc-A> [<svc-B> ...]` → Standalone. Cross-service pattern analysis: shared root causes, cascade patterns, systemic blind spots across multiple services. @see library/review-cross.md
@@ -432,7 +432,7 @@ For past-incident queries: set window around incident time ±15 min.
 - **`<missing_context_gating>`:** If service name is not yet known (Step 2 not complete), mark ALL hypotheses formed here as `[ASSUMED-SERVICE]`. Commit to an investigation sequence ONLY AFTER Step 2 confirms the target service. Hypotheses are placeholders, not plans.
 - **Systems context:** What upstream/downstream dependencies does this service have? What recently changed in this part of the system? (Check annotations, deploy history)
 - Apply Known Failure Pattern fast-path (see below) — if matched, shortcut to indicated tier
-- **Null Hypothesis Start:** Formulate hypotheses ONLY AFTER completing the initial Triage volume queries in Step 4.
+- **Null Hypothesis discipline:** Do NOT lock a lead hypothesis before the first analytical query returns concrete anomalies. Step 1 hypotheses are provisional seeds, not verdicts.
 - **Instrumentation hypothesis (always form):** "Is this environment's signal coverage sufficient to answer the question?" If Signal Landscape has any `none` or UNAVAILABLE tier, add to Hypothesis Tracker: "Root cause may reside in a signal type not exposed by this environment [INSTRUMENTATION_GAP risk]." This is not defeatism — it pre-arms the investigation against silent blind spots.
   *Auto-resolve rule:* If Signal Coverage shows ✅ (data found) for ALL tiers present in the Signal Landscape AND all tiers produce non-empty, non-void results for the target service → auto-REFUTE this hypothesis and note: `"Instrumentation hypothesis REFUTED: all available tiers returned data for service [X]."`
 - State chosen investigation sequence AFTER service confirmed: "Starting with Metrics (latency issue). If inconclusive → Traces."
@@ -458,9 +458,9 @@ If service name in Session State: skip. If user provides exact names: use direct
 If `search_dashboards` returns matches: retrieve `get_dashboard_summary` + `get_dashboard_panel_queries` to understand instrumentation.
 
 **No specific service named?** ("everything is slow", "errors across the board") — Dynamic Discovery:
-1. **Tempo first** (if `traces` in Signal Landscape): query service graph metrics → `tempo_query_metrics(query="traces_service_graph_request_failed_total")` → reveals all services + error/latency profile in 1 query. Returns ranked candidate list.
+1. **Tempo first** (if `traces` in Signal Landscape): run `tempo_traceql-metrics-instant` or `tempo_traceql-metrics-range` with sampling, grouped by `trace:rootService` or `resource.service.name`, to rank services by request/error volume.
 2. **Prometheus fallback** (if Tempo unavailable or empty): `list_prometheus_metric_names(regex="<symptom_keyword>")` → discover affected metric domains → query `up{} == 0` + top 5 error rates by service-identity label.
-3. **Logs fallback** (if Prometheus also empty): `search_loki(query="<symptom_keyword>", limit=20)` → group error logs by service label.
+3. **Logs fallback** (if Prometheus also empty): `search_logs(Pattern="<symptom_keyword>", Limit=20)` for quick keyword scans, then `query_loki_logs` if grouping/filter control is required.
 4. Cross-correlate candidates across available sources → produce ranked list:
    ```
    Service candidates: [service-A | confidence=HIGH (3/3 backends)] [service-B | MED (2/3)]
@@ -664,7 +664,7 @@ Now checking [BACKEND 2]. Service appears as: [label=value]
 
 ### Step 8: Synthesize & Output (Adaptive Depth)
 
-**Remediation Rule & AEC Rule Compilation:** Remediation is fully user responsibility (output NO recommendations). When the investigation identifies a stable causal predicate, preserve it in the output as a candidate Recording Rule, alert condition, or Tempo search tag grounded in the final Causal Graph and CAUSAL VALIDATION evidence.
+**Remediation Rule & Artifact Preservation:** Remediation is fully user responsibility (output NO recommendations). When the investigation identifies a stable causal predicate, preserve it in the output as a candidate Recording Rule, alert condition, or Tempo search tag grounded in the final Causal Graph and CAUSAL VALIDATION evidence.
 
 **The Self-Healing Clause:** For incidents that show a clear return to baseline within the investigation window, the output MUST identify the exact time of recovery and systematically correlate it with any resolving actions found in annotations (e.g., pod restarts, reverts, auto-scaling).
 
@@ -688,7 +688,7 @@ CONFLICT:   Selection rule: metric≠trace → cardinality; timestamp misalign �
 
 **Format template:** BEFORE constructing Step 8 output, load @see library/output.md — read ONLY the section matching the selected output mode.
 
-**RULE:** Destructive actions REQUIRE explicit human confirmation via --ask-user.
+**RULE:** Destructive actions REQUIRE explicit human confirmation.
 
 **`--grade` active?** After outputting Step 8, invoke the grade protocol (@see library/grade.md): self-assess from conversation context, ask user for outcome verdict, append quality block to `resolutions/<service>.md`.
 
@@ -734,7 +734,7 @@ CONFLICT:   Selection rule: metric≠trace → cardinality; timestamp misalign �
 
 ---
 
-*Worked example: @see context.md (Quick-Reference Example section).*
+*Worked example: @see .meta/context.md (Quick-Reference Example section).*
 
 ---
 

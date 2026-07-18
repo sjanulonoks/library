@@ -8,7 +8,7 @@
 
 ```
 <output_contract: TRIAGE>
-Required sections (in order): status-line, root-cause, immediate-actions, ruled-out
+Required sections (in order): status-line, root-cause, ruled-out
 Length: ≤8 lines total. No prose.
 Root cause MUST reference: alert name + state + labels (alert-confirmed evidence; CAUSAL VALIDATION not required on this fast-path).
 ⚠️ TRIAGE assumes alert is causally sufficient. If the user asks "why" or challenges the verdict → escalate to STANDARD investigation (alerts describe symptoms, not always root causes).
@@ -17,7 +17,6 @@ Omit: contributing-factors, evidence-appendix, resolution-queries (→ use DEEP 
 
 🔴 [Service]: [what happened in 1 sentence]
 Root cause: [1 sentence] → grounded in: alert [name] state=[state] labels=[labels]
-Immediate action: [1–2 bullets]
 Ruled out: [hypotheses refuted]
 ```
 
@@ -27,13 +26,13 @@ Ruled out: [hypotheses refuted]
 
 ```
 <output_contract: STANDARD>
-Required sections (in order): summary, timeline, evidence, root-cause, immediate-action, ruled-out, unmapped-anomalies
+Required sections (in order): summary, timeline, evidence, root-cause, artifact-preservation, ruled-out, unmapped-anomalies
 Root cause section MUST embed the CAUSAL VALIDATION block verbatim (not by reference). Format:
   ## Root Cause
   [CAUSAL VALIDATION block verbatim — all fields including Verdict]
   Evidence summary: [1 sentence]
 Optional: contributing-factors (≤2 bullets; include ONLY if ≥1 MODERATE finding is distinct from root cause and actionable), involved-architecture (list specific nodes discovered via breadcrumbs).
-Omit: evidence-appendix (→ use DEEP DIVE for 3+ backend incidents).
+Omit: evidence-appendix (→ use DEEP DIVE for 3+ backend incidents), remediation (user responsibility).
 ruled-out (required): for each REFUTED hypothesis, name the specific evidence that refuted it — 1 line max per hypothesis.
 unmapped-anomalies (required): list any verified anomalies that DO NOT logically fit into the confirmed root cause or contributing factors.
 </output_contract>
@@ -49,7 +48,7 @@ unmapped-anomalies (required): list any verified anomalies that DO NOT logically
 3. **Evidence** — Per-backend findings with Evidence Strength grades
    **Known unknowns:** [black boxes from CAUSAL VALIDATION Step 4.5 not resolved by investigation]
 4. **Root Cause** — Evidence-based with causal validation (Step 4.5)
-5. **Immediate Action** — 1–2 bullets (ONLY if root cause confirmed)
+5. **Artifact Preservation** — [candidate Recording Rule | alert condition | Tempo search tag], or `none` if the causal predicate is too unstable for automation
 6. **Unmapped Anomalies** — List any observed anomalies that are NOT explained by the root cause. If none, state "None".
 
 ---
