@@ -9,6 +9,7 @@ Review the conversation and produce:
 ```
 ## INVESTIGATION QUALITY — [service] — [UTC timestamp]
 - **Root cause:** [1 sentence + evidence grade]
+- **Failure unit:** [component + indicative metric family, or "unknown"]
 - **Key finding:** [non-obvious insight, or "none"]
 - **Blind spot:** [what wasn't checked and why]
 - **Outcome:** [CONFIRMED_RCA | PARTIAL_RCA | NO_RCA | UNCERTAIN]
@@ -44,6 +45,9 @@ date: <UTC timestamp>
 investigation_id: <sha1 of service+symptom+window>
 mode: <TRIAGE|STANDARD|DEEP DIVE>
 root_cause: <verdict text — 1 sentence>
+failure_unit:
+  component: <component|dependency|host|zone|unknown>
+  metric_family: <latency|errors|cpu|memory|connections|storage|dependency|custom|unknown>
 evidence_grade: <STRONG|MODERATE|WEAK>
 hypotheses_formed: <N>
 hypotheses_refuted: <N>

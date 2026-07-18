@@ -33,11 +33,12 @@ Compute `new_entries = M - N`.
   - Emit at Step 1: `[HISTORY CONFIDENCE: HIGH|LOW] — top pattern: [Root Cause] (Confirmed N, Invalidated M)`
 - If file has legacy prose `## Distilled Patterns` (pre-v0.57): use patterns directly.
 - If file has only raw entries: scan most recent 5 entries.
-  Extract: root causes, blind spots, user corrections.
+  Extract: root causes, failure units, blind spots, user corrections.
 
 ## Integration into Step 1
 
 - Add top-ranked pattern's `Root Cause` as Step 1 hypothesis
+- If available, add top-ranked pattern's `Failure Unit` as a Step 1 seed: `"Recurring failure unit may be [component / metric family]"`
 - **Structured Contrast Protocol** (replaces free-form "MUST form ≥1 contradicting hypothesis"):
   From top-ranked pattern, extract `Trigger` and `Vulnerability`. Form two grounded contrasts:
   - `[HISTORICAL CONTRAST A]`: `"Trigger was NOT [historical Trigger] — probe for alternative trigger [e.g., config change, dependency failure]"`

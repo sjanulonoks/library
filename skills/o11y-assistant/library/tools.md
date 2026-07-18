@@ -1,6 +1,6 @@
 # Analytical Backend Tool Reference
 
-> Loaded at Step 4 entry. Read ONLY the section for the backend you are about to query.
+> Primary load point: Step 4 entry. Read ONLY the section for the backend you are about to query.
 
 ---
 
@@ -99,6 +99,16 @@ Traces carry endpoint, version, status code, downstream service, DB statement â€
 | Cascade root cause (origin error)? | `{ span:status=error } !< { span:status=error }` |
 
 Use `\| topk(N)` to limit high-cardinality groupings. Use `trace:rootService="X"` (indexed) instead of `resource.service.name="X" && span:kind=server` (slower).
+
+**Service-unknown dynamic discovery** â€” when the symptom is global ("everything is slow", "errors across the board"), use grouped Tempo metrics as the first discovery pass before Prometheus fallback.
+
+| Discovery question | Query pattern |
+|--------------------|--------------|
+| Which root services currently dominate request volume? | `{ } \| rate() by (trace:rootService) with(sample=true) \| topk(5)` |
+| Which root services currently dominate error volume? | `{ span:status=error } \| rate() by (trace:rootService) with(sample=true) \| topk(5)` |
+| `trace:rootService` missing or sparse? | Re-run grouped by `resource.service.name`; treat it as the slower fallback. |
+
+Keep the window tight to the incident. Use Tempo only to rank candidates here; cross-check the winner in Prometheus and logs before committing the service mapping.
 
 ---
 

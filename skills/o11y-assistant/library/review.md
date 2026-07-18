@@ -15,6 +15,7 @@ Count and categorize from all grade entries (YAML Phase 4 blocks where available
 - **Entries since last distillation** (M minus `covered` from Distilled Patterns header, or M if no header)
 - **Outcome distribution** (CONFIRMED_RCA / PARTIAL_RCA / NO_RCA / UNCERTAIN)
 - **Recurring root causes** — group by similarity, count occurrences
+- **Recurring failure units** — group component + indicative metric family pairs, count occurrences
 - **Correction anti-weighting** — identify entries where `user_verdict: wrong`. For each:
   - Tag root cause as `Invalidated +1`
   - If `Invalidated / Confirmed ≥ 0.3` → mark pattern `[PARTIAL: N invalidations]`
@@ -43,9 +44,9 @@ User corrections:    [list or "none"]
 Invalidated patterns: [root cause — N invalidations | "none"]
 
 Top patterns (by weighted rank):
-| Rank | Root Cause | Trigger | Vulnerability | Confirmed | Invalidated | Weight | Last Seen |
-|------|-----------|---------|---------------|-----------|-------------|--------|-----------|
-| 1    | ...        | ...     | ...           | N         | M           | W      | YYYY-MM-DD |
+| Rank | Root Cause | Failure Unit | Trigger | Vulnerability | Confirmed | Invalidated | Weight | Last Seen |
+|------|-----------|--------------|---------|---------------|-----------|-------------|--------|-----------|
+| 1    | ...        | ...          | ...     | ...           | N         | M           | W      | YYYY-MM-DD |
 
 Recurring blind spots: [list or "none"]
 ```
@@ -64,9 +65,9 @@ Rewrite `resolutions/<service>.md` with:
 1. `## Distilled Patterns` section at top with metadata header and Weighted Pattern Ranking table:
    ```markdown
    ## Distilled Patterns — last: <UTC> — covered: <M> entries — total: <M>
-   | Rank | Root Cause | Trigger | Vulnerability | Confirmed | Invalidated | Weight | Last Seen |
-   |------|-----------|---------|---------------|-----------|-------------|--------|-----------|
-   | 1    | ...        | ...     | ...           | N         | M           | W.W    | YYYY-MM-DD |
+   | Rank | Root Cause | Failure Unit | Trigger | Vulnerability | Confirmed | Invalidated | Weight | Last Seen |
+   |------|-----------|--------------|---------|---------------|-----------|-------------|--------|-----------|
+   | 1    | ...        | ...          | ...     | ...           | N         | M           | W.W    | YYYY-MM-DD |
    ```
    Patterns marked `[PARTIAL: N invalidations]` are included but visually flagged.
 
@@ -80,6 +81,7 @@ Rewrite `resolutions/<service>.md` with:
    - union of blind spots
    - any user corrections
    - Tripartite (Trigger / Vulnerability / Precondition) from the best-graded entry
+   - Failure Unit (component + indicative metric family) from the best-graded entry
 
 3. Unique investigations (different root cause OR different Trigger) preserved individually.
 

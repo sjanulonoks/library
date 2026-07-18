@@ -1,6 +1,6 @@
 ---
 name: o11y-assistant
-version: 0.70
+version: 0.71
 description: >
   ALWAYS USE when investigating incidents, checking system health, exploring services,
   validating hypotheses, or querying ANY observability backend (Prometheus/Mimir,
@@ -540,9 +540,9 @@ When escalating, state:
 9. Analyze: trend, spike, anomaly
 10. **Localization gate:** Before escalating beyond the current tier or using this anomaly in Step 4.5, localize it as specifically as the current signal allows:
     - `When:` exact spike window or `global/steady`
-    - `Where:` service, dependency, host, zone, or `unlocalized`
+    - `Where:` service/dependency/host/zone + failure unit (component + indicative metric family), or `unlocalized`
     - `Cohort:` route, tenant, version, shard, endpoint, or `none visible`
-    If the anomaly remains unlocalized, state that explicitly and do not escalate unless Step 3.5 condition (2) or (3) applies.
+    If still unlocalized, state that explicitly and do not escalate unless Step 3.5 condition (2) or (3) applies.
 11. Extract 1–5 key findings → **update Hypothesis Tracker + Signal Coverage**
      Each finding MUST include inline source tag: `[src: <tool_name> expr/query="..." → <key value>]`
      Example: `Error rate 4.7% [src: query_prometheus expr="rate(http_errors[5m])" → 0.047]`
@@ -578,7 +578,7 @@ For each detected anomaly:
 1. **Constraint Intersection Check** (MANDATORY): `[REVERSAL TEST] - What is strongest argument this finding is a RED HERRING unrelated to Primary Constraint? If empirically sound, STATUS: RED HERRING.` Discard RED HERRINGS.
 2. **Temporal Math (Bounded)**: Calculate explicit `ΔT`. If `ΔT` violates tolerance (1m sync, 15m async, 24h batch) AND is not a LATENT_PRECONDITION, status is COINCIDENCE.
 3. **Common Cause Check (C Hidden Node)**: Prove `C caused both A and B` (shared infra) before asserting `A caused B`.
-4. **Saturation vs Error**: High usage without saturation (OOM, throttling) = symptom, not cause.
+4. **Gray Failure / Saturation**: Requester-visible failures outweigh provider-local "healthy" heartbeats; high usage without saturation (OOM, throttling) = symptom, not cause.
 5. **Breadcrumb Anchors**: Unique correlation IDs or IP addresses allow lateral pivots across boundaries.
 6. **Cause or Symptom?** — If I fix X, does the original symptom disappear?
 7. **Coincidence check** — Did X start BEFORE symptom? Is magnitude proportional (≥30%)?
@@ -590,7 +590,7 @@ For each detected anomaly:
 ## CAUSAL VALIDATION
 Anomaly: [description]
 - Evidence integrity: freshness=[within window|lagged|stale]; sampling=[full|sampled|unknown]; coverage=[complete|partial|gap:<signal>]; basis=[directly observed|partly inferred]
-- Timing & Spatial Proof: [Proof of alignment with macroscopic symptom, including when/where/cohort localization]
+- Timing & Spatial Proof / Failure unit: [Proof of alignment with macroscopic symptom, including when/where/cohort localization + localized component and indicative metric family, or `unknown`]
 - Reversal test: strongest evidence AGAINST this verdict = [___]
   Absent → "Reversal clear — ¬ROOT CAUSE requires [X] which is absent — confirmed absent by: [specific query/tool call]." You MUST name the query.
   Present → downgrade to CONTRIBUTING FACTOR; do NOT declare ROOT CAUSE.
@@ -664,7 +664,7 @@ Now checking [BACKEND 2]. Service appears as: [label=value]
 
 ### Step 8: Synthesize & Output (Adaptive Depth)
 
-**Remediation Rule & Artifact Preservation:** Remediation is fully user responsibility (output NO recommendations). When the investigation identifies a stable causal predicate, preserve it in the output as a candidate Recording Rule, alert condition, or Tempo search tag grounded in the final Causal Graph and CAUSAL VALIDATION evidence.
+**Remediation Rule & Artifact Preservation:** Remediation is fully user responsibility (output NO recommendations). When the investigation identifies a stable causal predicate, preserve it in the output as a candidate Recording Rule, alert condition, log-slice predicate, or Tempo search tag grounded in the final Causal Graph and CAUSAL VALIDATION evidence.
 
 **The Self-Healing Clause:** For incidents that show a clear return to baseline within the investigation window, the output MUST identify the exact time of recovery and systematically correlate it with any resolving actions found in annotations (e.g., pod restarts, reverts, auto-scaling).
 

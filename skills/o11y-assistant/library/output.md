@@ -48,7 +48,7 @@ unmapped-anomalies (required): list any verified anomalies that DO NOT logically
 3. **Evidence** — Per-backend findings with Evidence Strength grades
    **Known unknowns:** [black boxes from CAUSAL VALIDATION Step 4.5 not resolved by investigation]
 4. **Root Cause** — Evidence-based with causal validation (Step 4.5)
-5. **Artifact Preservation** — [candidate Recording Rule | alert condition | Tempo search tag], or `none` if the causal predicate is too unstable for automation
+5. **Artifact Preservation** — [candidate Recording Rule | alert condition | log-slice predicate | Tempo search tag], or `none` if the causal predicate is too unstable for automation
 6. **Unmapped Anomalies** — List any observed anomalies that are NOT explained by the root cause. If none, state "None".
 
 ---
